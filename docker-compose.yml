@@ -1,0 +1,243 @@
+# aibrarian stack for z8g4.  GPU0 = whisper (aibrarian-gpu), GPU1 = ollama.
+# Jellyfin stays in /opt/stacks/media (host network, :8096).
+#   docker compose up -d                       # core stack
+#   docker compose --profile devtools up -d    # + DeepWiki + Code-Graph-RAG (docs/devtools.md)
+name: aibrarian
+
+x-aib-env: &aib-env
+  AIB_DATABASE_URL: postgresql://${POSTGRES_USER:-aibrarian}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/aibrarian
+  AIB_QDRANT_URL: http://qdrant:6333
+  AIB_OLLAMA_URL: http://ollama:11434
+  AIB_JELLYFIN_URL: ${JELLYFIN_URL:-http://host.docker.internal:8096}
+  AIB_JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+  AIB_GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
+  AIB_MEDIA_ROOT: /media
+  AIB_TRANSCRIBE_ROOTS: ${AIB_TRANSCRIBE_ROOTS:-01-movies,02-tvshows,05-instructional_videos}
+  AIB_LIBRARY_ROOTS: ${AIB_LIBRARY_ROOTS:-01-movies,02-tvshows,03-music,downloads}
+  AIB_BOOK_SOURCE_DIRS: /media/book_drop,/media/downloads
+  AIB_CALIBRE_DIR: /books
+  AIB_AUDIOBOOKS_DIR: /audiobookshelf/audiobooks
+  AIB_PODCASTS_DIR: /audiobookshelf/podcasts
+  AIB_REPORT_DIR: /data/reports
+  AIB_CLIPS_DIR: /data/clips
+  AIB_BOOK_MODE: ${AIB_BOOK_MODE:-suggest}
+  AIB_BOOK_MIN_CONFIDENCE: ${AIB_BOOK_MIN_CONFIDENCE:-0.85}
+  AIB_BOOK_REVIEW_CONFIDENCE: ${AIB_BOOK_REVIEW_CONFIDENCE:-0.60}
+  AIB_TRANSCRIBE_BATCH_SIZE: ${AIB_TRANSCRIBE_BATCH_SIZE:-5}
+  AIB_TRANSCRIBE_INTERVAL_S: ${AIB_TRANSCRIBE_INTERVAL_S:-300}
+  PREFECT_API_URL: http://prefect-server:4200/api
+  TZ: ${TZ:-UTC}
+
+x-media-volumes: &media-volumes
+  - ${MEDIA_HOST_ROOT:-/opt/jellyfin/media}:/media
+  - ${CALIBRE_HOST_DIR:-/opt/calibre/books}:/books
+  - ${ABS_HOST_ROOT:-/opt/audiobookshelf}:/audiobookshelf
+  - ${AIB_DATA_HOST_DIR:-/opt/stacks/aibrarian/data}:/data
+  - ${OPENLIBRARY_HOST_DIR:-/opt/stacks/ai/openlibrary}:/data/openlibrary:ro
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aibrarian}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: aibrarian
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d aibrarian"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    restart: unless-stopped
+    ports: ["6333:6333", "6334:6334"]
+    volumes: [qdrant_data:/qdrant/storage]
+    healthcheck:
+      # the qdrant image has no curl/wget; bash /dev/tcp is enough for liveness
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports: ["11434:11434"]
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_MAX_LOADED_MODELS: "2"   # qwen3:14b + nomic-embed-text stay resident
+    volumes: [ollama_models:/root/.ollama]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["1"], capabilities: [gpu]}]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  prefect-server:
+    image: prefecthq/prefect:3-python3.12
+    restart: unless-stopped
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER:-aibrarian}:${POSTGRES_PASSWORD}@postgres:5432/prefect
+      PREFECT_UI_API_URL: ${PREFECT_UI_API_URL:-http://localhost:4200/api}
+    ports: ["4200:4200"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  aibrarian-api:
+    build: {context: ., dockerfile: docker/Dockerfile}
+    image: aibrarian:latest
+    restart: unless-stopped
+    command: ["aibrarian", "api"]
+    user: "${AIB_UID:-1000}:${AIB_GID:-1000}"
+    environment: *aib-env
+    volumes: *media-volumes
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports:
+      - "8790:8790"   # unified API (old catalog-api port)
+      - "8787:8790"   # compat: old ai-jellyfin-librarian
+      - "8788:8790"   # compat: old ai-book-librarian
+      - "8791:8790"   # compat: old movie-clipper
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8790/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  aibrarian-worker:
+    # CPU worker: library-scan, book-scan, retry-failed, openlibrary-import
+    image: aibrarian:latest
+    build: {context: ., dockerfile: docker/Dockerfile}
+    restart: unless-stopped
+    command: ["aibrarian", "worker", "cpu"]
+    user: "${AIB_UID:-1000}:${AIB_GID:-1000}"
+    environment:
+      <<: *aib-env
+      AIB_METRICS_PORT: "9108"
+    volumes: *media-volumes
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["9108:9108"]
+    depends_on:
+      prefect-server: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  aibrarian-gpu:
+    # GPU worker: media-pipeline (probe -> extract_audio -> transcribe -> embed -> catalog)
+    build: {context: ., dockerfile: docker/Dockerfile.gpu}
+    image: aibrarian-gpu:latest
+    restart: unless-stopped
+    command: ["aibrarian", "worker", "gpu"]
+    environment:
+      <<: *aib-env
+      AIB_METRICS_PORT: "9109"
+      AIB_WHISPER_MODEL: ${AIB_WHISPER_MODEL:-large-v3}
+      AIB_WHISPER_DEVICE: cuda
+      AIB_WHISPER_COMPUTE_TYPE: float16
+      NVIDIA_VISIBLE_DEVICES: "0"
+    volumes:
+      - ${MEDIA_HOST_ROOT:-/opt/jellyfin/media}:/media
+      - ${AIB_DATA_HOST_DIR:-/opt/stacks/aibrarian/data}:/data
+      - whisper_models:/models
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["9109:9109"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["0"], capabilities: [gpu]}]
+    depends_on:
+      prefect-server: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+
+  # ---------------------------------------------------------------- devtools
+  deepwiki:
+    profiles: [devtools]
+    image: ghcr.io/asyncfuncai/deepwiki-open:latest
+    restart: unless-stopped
+    environment:
+      PORT: "8001"
+      NODE_ENV: production
+      SERVER_BASE_URL: http://localhost:8001
+      DEEPWIKI_EMBEDDER_TYPE: ollama
+      OLLAMA_HOST: http://ollama:11434
+    ports:
+      - "127.0.0.1:8001:8001"   # API
+      - "127.0.0.1:3001:3000"   # UI (3000 is Grafana on z8g4)
+    volumes:
+      - deepwiki_data:/root/.adalflow
+      - ./:/app/local-repos/aibrarian:ro
+    depends_on: [ollama]
+
+  memgraph:
+    profiles: [devtools]
+    image: memgraph/memgraph-mage:3.3
+    restart: unless-stopped
+    command: ["--telemetry-enabled=false"]
+    ports: ["127.0.0.1:7687:7687", "127.0.0.1:7444:7444"]
+    volumes: [memgraph_data:/var/lib/memgraph]
+
+  memgraph-lab:
+    profiles: [devtools]
+    image: memgraph/lab:3.13.2
+    restart: unless-stopped
+    environment:
+      QUICK_CONNECT_MG_HOST: memgraph
+    ports: ["127.0.0.1:3002:3000"]
+    depends_on: [memgraph]
+
+  codegraph-index:
+    # one-shot: (re)build the code graph of this repo
+    #   docker compose --profile devtools run --rm codegraph-index
+    profiles: [devtools]
+    image: ghcr.io/vitali87/code-graph-rag:latest
+    command: ["start", "--repo-path", "/repo", "--update-graph"]
+    environment: &cgr-env
+      MEMGRAPH_HOST: memgraph
+      MEMGRAPH_PORT: "7687"
+      TARGET_REPO_PATH: /repo
+      ORCHESTRATOR_PROVIDER: ollama
+      ORCHESTRATOR_MODEL: ${CGR_MODEL:-qwen3:14b}
+      ORCHESTRATOR_ENDPOINT: http://ollama:11434/v1
+      CYPHER_PROVIDER: ollama
+      CYPHER_MODEL: ${CGR_MODEL:-qwen3:14b}
+      CYPHER_ENDPOINT: http://ollama:11434/v1
+      OLLAMA_BASE_URL: http://ollama:11434
+    volumes: ["./:/repo:ro"]
+    restart: "no"
+    depends_on: [memgraph]
+
+  codegraph-mcp:
+    # MCP server (HTTP transport) for editors/agents to query the graph
+    profiles: [devtools]
+    image: ghcr.io/vitali87/code-graph-rag:latest
+    command: ["mcp-server", "--transport", "http", "--host", "0.0.0.0", "--port", "8080"]
+    environment: *cgr-env
+    volumes: ["./:/repo:ro"]
+    ports: ["127.0.0.1:8085:8080"]
+    restart: unless-stopped
+    depends_on: [memgraph]
+
+volumes:
+  pg_data:
+  qdrant_data:
+  ollama_models:
+  whisper_models:
+  deepwiki_data:
+  memgraph_data:

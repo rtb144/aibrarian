@@ -1,0 +1,27 @@
+{
+  "title": "aibrarian",
+  "uid": "aibrarian",
+  "schemaVersion": 39,
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {"list": [{"name": "DS", "type": "datasource", "query": "prometheus"}]},
+  "panels": [
+    {"type": "bargauge", "title": "Items per stage", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "${DS}"},
+     "targets": [{"expr": "aib_media_items", "legendFormat": "{{stage}}"}]},
+    {"type": "stat", "title": "Backlog", "gridPos": {"x": 12, "y": 0, "w": 4, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "${DS}"},
+     "targets": [{"expr": "aib_backlog_items"}]},
+    {"type": "stat", "title": "Failed", "gridPos": {"x": 16, "y": 0, "w": 4, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "${DS}"},
+     "targets": [{"expr": "aib_media_items{stage=\"failed\"}"}]},
+    {"type": "stat", "title": "Open suggestions", "gridPos": {"x": 20, "y": 0, "w": 4, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "${DS}"},
+     "targets": [{"expr": "sum(aib_suggestions_open)"}]},
+    {"type": "timeseries", "title": "Actions / hour by outcome", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 9},
+     "datasource": {"type": "prometheus", "uid": "${DS}"},
+     "targets": [{"expr": "sum by (action, outcome) (increase(aib_action_total[1h]))", "legendFormat": "{{action}} {{outcome}}"}]},
+    {"type": "timeseries", "title": "p95 action duration (s)", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 9},
+     "datasource": {"type": "prometheus", "uid": "${DS}"},
+     "targets": [{"expr": "histogram_quantile(0.95, sum by (le, action) (rate(aib_action_duration_seconds_bucket[30m])))", "legendFormat": "{{action}}"}]}
+  ]
+}

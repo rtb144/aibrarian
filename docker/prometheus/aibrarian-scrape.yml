@@ -1,0 +1,9 @@
+# Add to the existing Prometheus in /opt/stacks/monitoring (prometheus.yml -> scrape_configs).
+# z8g4 ports: API 8790 (stage gauges, backlog), workers 9108/9109 (action counters/durations).
+- job_name: aibrarian-api
+  metrics_path: /metrics
+  static_configs:
+    - targets: ["z8g4:8790"]
+- job_name: aibrarian-workers
+  static_configs:
+    - targets: ["z8g4:9108", "z8g4:9109"]

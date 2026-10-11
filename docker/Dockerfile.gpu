@@ -1,0 +1,19 @@
+# GPU worker: faster-whisper large-v3 on CUDA 12.8 + cuDNN 9 (GPU0).
+# Runs the media-pipeline Prefect deployment (probe..catalog).
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH \
+    HF_HOME=/models
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3.12 python3.12-venv ffmpeg tini curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3.12 -m venv /opt/venv
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install ".[flows,media,transcribe]" && rm -rf /src
+# Runs as root on purpose: sidecars are chown-ed to match each video (as before).
+WORKDIR /tmp
+EXPOSE 9108
+ENTRYPOINT ["tini", "--"]
+CMD ["aibrarian", "worker", "gpu"]
