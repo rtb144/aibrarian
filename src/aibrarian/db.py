@@ -1,0 +1,429 @@
+"""Postgres access: a tiny migration runner plus typed repository helpers.
+
+Migrations are plain ``NNN_name.sql`` files shipped inside the package and
+tracked in ``aib.schema_migrations``. They run automatically on service start
+(``aibrarian migrate`` runs them explicitly).
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from importlib import resources
+from typing import Any
+
+import psycopg
+from psycopg.rows import dict_row
+
+from .config import Settings
+from .models import MediaFile, Segment, Suggestion
+
+MIGRATIONS_PKG = "aibrarian.migrations"
+
+
+def list_migrations() -> list[tuple[str, str]]:
+    """Return ``(version, sql)`` pairs sorted by filename."""
+    files = resources.files(MIGRATIONS_PKG)
+    out = [
+        (f.name.removesuffix(".sql"), f.read_text(encoding="utf-8"))
+        for f in files.iterdir()
+        if f.name.endswith(".sql")
+    ]
+    return sorted(out)
+
+
+class Database:
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    @classmethod
+    def from_settings(cls, s: Settings) -> Database:
+        return cls(s.database_url)
+
+    @contextmanager
+    def conn(self) -> Iterator[psycopg.Connection]:
+        with psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False) as c:
+            yield c
+
+    # -- migrations ---------------------------------------------------------
+    def migrate(self) -> list[str]:
+        applied: list[str] = []
+        with self.conn() as c:
+            c.execute("CREATE SCHEMA IF NOT EXISTS aib")
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS aib.schema_migrations "
+                "(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+            c.execute("SELECT pg_advisory_xact_lock(724411)")
+            done = {r["version"] for r in c.execute("SELECT version FROM aib.schema_migrations")}
+            for version, sql in list_migrations():
+                if version in done:
+                    continue
+                c.execute(sql)
+                c.execute("INSERT INTO aib.schema_migrations(version) VALUES (%s)", (version,))
+                applied.append(version)
+            c.commit()
+        return applied
+
+    # -- media + state machine -------------------------------------------
+    def upsert_media(self, files: Sequence[MediaFile]) -> list[dict[str, Any]]:
+        """Insert/refresh files. New files and files whose fingerprint changed are
+        (re)set to ``discovered`` and get a history event. Returns
+        ``[{id, path, created, reset}]``."""
+        out: list[dict[str, Any]] = []
+        if not files:
+            return out
+        sql = """
+        INSERT INTO aib.media_file
+            (path, root, kind, size_bytes, mtime, fingerprint, title, year, season, episode)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (path) DO UPDATE SET
+            size_bytes=EXCLUDED.size_bytes, mtime=EXCLUDED.mtime,
+            fingerprint=EXCLUDED.fingerprint, title=EXCLUDED.title, year=EXCLUDED.year,
+            season=EXCLUDED.season, episode=EXCLUDED.episode, missing=FALSE, last_seen=now(),
+            stage = CASE WHEN aib.media_file.fingerprint <> EXCLUDED.fingerprint
+                         THEN 'discovered' ELSE aib.media_file.stage END,
+            stage_attempts = CASE WHEN aib.media_file.fingerprint <> EXCLUDED.fingerprint
+                         THEN 0 ELSE aib.media_file.stage_attempts END
+        RETURNING id, path, (xmax = 0) AS created,
+                  (SELECT m.fingerprint FROM aib.media_file m WHERE m.id=aib.media_file.id)
+                    AS old_fp, fingerprint
+        """
+        with self.conn() as c:
+            for f in files:
+                row = c.execute(sql, (str(f.path), f.root, f.kind, f.size_bytes, f.mtime,
+                                      f.fingerprint, f.title, f.year, f.season,
+                                      f.episode)).fetchone()
+                created = bool(row["created"])
+                reset = (not created) and row["old_fp"] != row["fingerprint"]
+                if created or reset:
+                    c.execute(
+                        "INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,"
+                        " outcome, started_at) VALUES (%s,%s,NULL,'discovered',%s,now())",
+                        (row["id"], "discover", "ok" if created else "reset"))
+                out.append({"id": row["id"], "path": row["path"],
+                            "created": created, "reset": reset})
+            c.commit()
+        return out
+
+    def mark_missing(self, root: str, present_paths: Sequence[str]) -> int:
+        with self.conn() as c:
+            cur = c.execute(
+                "UPDATE aib.media_file SET missing=TRUE "
+                "WHERE root=%s AND NOT missing AND NOT (path = ANY(%s))",
+                (root, list(present_paths)),
+            )
+            c.commit()
+            return cur.rowcount
+
+    def get_media(self, media_id: int) -> dict[str, Any] | None:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.media_file WHERE id=%s", (media_id,)).fetchone()
+
+    def find_media_by_title(self, title: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Trigram-ranked fuzzy title lookup (pg_trgm)."""
+        with self.conn() as c:
+            return c.execute(
+                "SELECT *, similarity(title, %s) AS sim FROM aib.media_file "
+                "WHERE NOT missing AND (title %% %s OR title ILIKE %s) "
+                "ORDER BY sim DESC, title LIMIT %s",
+                (title, title, f"%{title}%", limit),
+            ).fetchall()
+
+    def get_media_by_path(self, path: str) -> dict[str, Any] | None:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.media_file WHERE path=%s", (path,)).fetchone()
+
+    def list_media(self, stage: str | None = None, kind: str | None = None,
+                   limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT id, path, root, kind, title, year, season, episode, stage, "
+                "duration_s, jellyfin_id FROM aib.media_file WHERE NOT missing "
+                "AND (%s::text IS NULL OR stage=%s) AND (%s::text IS NULL OR kind=%s) "
+                "ORDER BY id LIMIT %s OFFSET %s",
+                (stage, stage, kind, kind, limit, offset)).fetchall()
+
+    def update_path(self, old: str, new: str) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE aib.media_file SET path=%s WHERE path=%s", (new, old))
+            c.commit()
+
+    def update_media_fields(self, media_id: int, **fields: Any) -> None:
+        allowed = {"duration_s", "probe", "audio_path", "jellyfin_id", "title", "year"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"cannot update {bad}")
+        if not fields:
+            return
+        cols = ", ".join(f"{k}=%s" for k in fields)
+        vals = [json.dumps(v) if k == "probe" else v for k, v in fields.items()]
+        with self.conn() as c:
+            c.execute(f"UPDATE aib.media_file SET {cols} WHERE id=%s", (*vals, media_id))
+            c.commit()
+
+    def claim(self, stage: str, roots: Sequence[str] | None, limit: int,
+              worker: str, lease_minutes: int = 360) -> list[dict[str, Any]]:
+        """Lease up to ``limit`` items sitting in ``stage``. Uses SKIP LOCKED so
+        concurrent workers never get the same item; stale leases expire."""
+        sql = """
+        UPDATE aib.media_file SET locked_by=%s, locked_at=now()
+        WHERE id IN (
+            SELECT id FROM aib.media_file
+            WHERE stage=%s AND NOT missing AND kind='video'
+              AND (%s::text[] IS NULL OR root = ANY(%s::text[]))
+              AND (locked_at IS NULL OR locked_at < now() - make_interval(mins => %s))
+            ORDER BY stage_changed_at LIMIT %s
+            FOR UPDATE SKIP LOCKED)
+        RETURNING *
+        """
+        r = list(roots) if roots else None
+        with self.conn() as c:
+            rows = c.execute(sql, (worker, stage, r, r, lease_minutes, limit)).fetchall()
+            c.commit()
+        return rows
+
+    def transition(self, media_id: int, action: str, from_stage: str, to_stage: str,
+                   outcome: str, started_at: Any, *, attempt: int = 1,
+                   error: str | None = None, details: dict[str, Any] | None = None,
+                   flow_run_id: str | None = None, task_run_id: str | None = None) -> bool:
+        """Atomically move an item and append a history event. Guarded by the
+        expected ``from_stage`` so racing workers cannot double-apply. Returns
+        False if the item was no longer in ``from_stage``."""
+        with self.conn() as c:
+            cur = c.execute(
+                """UPDATE aib.media_file SET stage=%s, stage_changed_at=now(),
+                       stage_attempts = CASE WHEN %s='ok' THEN 0 ELSE stage_attempts END,
+                       last_error=%s,
+                       failed_stage = CASE WHEN %s='failed' THEN %s ELSE NULL END,
+                       locked_by=NULL, locked_at=NULL
+                   WHERE id=%s AND stage=%s""",
+                (to_stage, outcome, error, to_stage, from_stage, media_id, from_stage))
+            if cur.rowcount == 0:
+                c.rollback()
+                return False
+            c.execute(
+                """INSERT INTO aib.media_event (media_id, action, from_stage, to_stage, outcome,
+                       attempt, started_at, error, details, flow_run_id, task_run_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (media_id, action, from_stage, to_stage, outcome, attempt, started_at,
+                 error[:4000] if error else None, json.dumps(details or {}),
+                 flow_run_id, task_run_id))
+            c.commit()
+        return True
+
+    def record_attempt_failure(self, media_id: int, action: str, stage: str, started_at: Any,
+                               error: str, attempt: int, flow_run_id: str | None = None,
+                               task_run_id: str | None = None) -> None:
+        """Log a failed attempt that will be retried (stage unchanged)."""
+        with self.conn() as c:
+            c.execute("UPDATE aib.media_file SET stage_attempts=stage_attempts+1, last_error=%s,"
+                      " locked_by=NULL, locked_at=NULL WHERE id=%s", (error[:4000], media_id))
+            c.execute(
+                """INSERT INTO aib.media_event (media_id, action, from_stage, to_stage, outcome,
+                       attempt, started_at, error, flow_run_id, task_run_id)
+                   VALUES (%s,%s,%s,%s,'failed',%s,%s,%s,%s,%s)""",
+                (media_id, action, stage, stage, attempt, started_at, error[:4000],
+                 flow_run_id, task_run_id))
+            c.commit()
+
+    def retry_failed(self, media_id: int | None = None) -> int:
+        """Move failed items back to the stage that failed (all, or one)."""
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id, failed_stage FROM aib.media_file WHERE stage='failed' "
+                "AND failed_stage IS NOT NULL AND (%s::bigint IS NULL OR id=%s)",
+                (media_id, media_id)).fetchall()
+            for r in rows:
+                c.execute("UPDATE aib.media_file SET stage=%s, stage_attempts=0, "
+                          "stage_changed_at=now() WHERE id=%s", (r["failed_stage"], r["id"]))
+                c.execute("INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,"
+                          " outcome, started_at) VALUES (%s,'retry','failed',%s,'reset',now())",
+                          (r["id"], r["failed_stage"]))
+            c.commit()
+        return len(rows)
+
+    # -- transcripts --------------------------------------------------------
+    def save_segments(self, media_id: int, segments: Sequence[Segment], fingerprint: str,
+                      language: str | None, model: str, duration_s: float | None) -> list[int]:
+        with self.conn() as c:
+            c.execute("DELETE FROM aib.segment WHERE media_id=%s", (media_id,))
+            ids: list[int] = []
+            for seg in segments:
+                row = c.execute(
+                    "INSERT INTO aib.segment (media_id, seq, start_s, end_s, text, words) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                    (media_id, seg.seq, seg.start, seg.end, seg.text,
+                     json.dumps(seg.words) if seg.words is not None else None),
+                ).fetchone()
+                ids.append(row["id"])
+            c.execute(
+                """INSERT INTO aib.transcript (media_id, fingerprint, language, model, duration_s)
+                   VALUES (%s,%s,%s,%s,%s) ON CONFLICT (media_id) DO UPDATE SET
+                   fingerprint=EXCLUDED.fingerprint, language=EXCLUDED.language,
+                   model=EXCLUDED.model, duration_s=EXCLUDED.duration_s, updated_at=now()""",
+                (media_id, fingerprint, language, model, duration_s))
+            c.commit()
+        return ids
+
+    def segments_by_ids(self, ids: Sequence[int]) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT s.*, m.path, m.title FROM aib.segment s "
+                "JOIN aib.media_file m ON m.id=s.media_id WHERE s.id = ANY(%s)",
+                (list(ids),),
+            ).fetchall()
+
+    def segments_for_media(self, media_id: int) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT * FROM aib.segment WHERE media_id=%s ORDER BY seq", (media_id,)
+            ).fetchall()
+
+    def keyword_search(self, query: str, limit: int = 20,
+                       media_id: int | None = None) -> list[dict[str, Any]]:
+        """Trigram fuzzy + full-text search over segments (old catalog_db.search_text)."""
+        with self.conn() as c:
+            return c.execute(
+                """SELECT s.id, s.media_id, s.seq, s.start_s, s.end_s, s.text, m.path, m.title,
+                          GREATEST(similarity(s.text, %(q)s),
+                                   ts_rank(s.tsv, plainto_tsquery('simple', %(q)s))) AS score
+                   FROM aib.segment s JOIN aib.media_file m ON m.id = s.media_id
+                   WHERE (s.text %% %(q)s OR s.text ILIKE '%%' || %(q)s || '%%'
+                          OR s.tsv @@ plainto_tsquery('simple', %(q)s))
+                     AND (%(mid)s::bigint IS NULL OR s.media_id = %(mid)s)
+                   ORDER BY score DESC LIMIT %(n)s""",
+                {"q": query, "mid": media_id, "n": limit}).fetchall()
+
+    # -- suggestions --------------------------------------------------------
+    def save_suggestion(self, s: Suggestion) -> int:
+        with self.conn() as c:
+            row = c.execute(
+                """INSERT INTO aib.suggestion
+                   (domain, source_path, target_path, metadata, confidence, decision, rationale,
+                    media_kind, op, run_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (domain, source_path) DO UPDATE SET
+                     target_path=EXCLUDED.target_path, metadata=EXCLUDED.metadata,
+                     media_kind=EXCLUDED.media_kind, op=EXCLUDED.op, run_id=EXCLUDED.run_id,
+                     confidence=EXCLUDED.confidence, decision=EXCLUDED.decision,
+                     rationale=EXCLUDED.rationale, status='open', created_at=now()
+                   RETURNING id""",
+                (s.domain, s.source_path, s.target_path, json.dumps(s.metadata),
+                 s.confidence, s.decision, s.rationale, s.media_kind, s.op, s.run_id),
+            ).fetchone()
+            c.commit()
+            return row["id"]
+
+    def list_suggestions(self, domain: str | None, status: str = "open") -> list[dict[str, Any]]:
+        with self.conn() as c:
+            if domain:
+                return c.execute(
+                    "SELECT * FROM aib.suggestion WHERE domain=%s AND status=%s "
+                    "ORDER BY created_at DESC", (domain, status)).fetchall()
+            return c.execute(
+                "SELECT * FROM aib.suggestion WHERE status=%s ORDER BY created_at DESC",
+                (status,)).fetchall()
+
+    def get_suggestion(self, sid: int) -> dict[str, Any] | None:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.suggestion WHERE id=%s", (sid,)).fetchone()
+
+    def set_suggestion_status(self, sid: int, status: str) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE aib.suggestion SET status=%s WHERE id=%s", (status, sid))
+            c.commit()
+
+    def suggestion_sources(self, domain: str, include_open: bool = True) -> set[str]:
+        """Source paths already handled - used to resume interrupted scans."""
+        statuses = ["applied", "dismissed"] + (["open"] if include_open else [])
+        with self.conn() as c:
+            rows = c.execute("SELECT source_path FROM aib.suggestion WHERE domain=%s "
+                             "AND status = ANY(%s)", (domain, statuses)).fetchall()
+        return {r["source_path"] for r in rows}
+
+    def start_run(self, domain: str, params: dict[str, Any],
+                  flow_run_id: str | None = None) -> int:
+        with self.conn() as c:
+            row = c.execute("INSERT INTO aib.scan_run (domain, params, flow_run_id) "
+                            "VALUES (%s,%s,%s) RETURNING id",
+                            (domain, json.dumps(params), flow_run_id)).fetchone()
+            c.commit()
+            return row["id"]
+
+    def finish_run(self, run_id: int, summary: dict[str, Any]) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE aib.scan_run SET finished_at=now(), summary=%s WHERE id=%s",
+                      (json.dumps(summary), run_id))
+            c.commit()
+
+    def latest_run(self, domain: str) -> dict[str, Any] | None:
+        with self.conn() as c:
+            run = c.execute("SELECT * FROM aib.scan_run WHERE domain=%s ORDER BY id DESC "
+                            "LIMIT 1", (domain,)).fetchone()
+            if run:
+                run["items"] = c.execute("SELECT * FROM aib.suggestion WHERE run_id=%s "
+                                         "ORDER BY id", (run["id"],)).fetchall()
+            return run
+
+    def record_file_op(self, op: str, src: str, dst: str | None, result: str,
+                       error: str | None = None, suggestion_id: int | None = None) -> None:
+        with self.conn() as c:
+            c.execute("INSERT INTO aib.file_op (suggestion_id, op, src, dst, result, error) "
+                      "VALUES (%s,%s,%s,%s,%s,%s)", (suggestion_id, op, src, dst, result, error))
+            c.commit()
+
+    def file_ops(self, result: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.file_op WHERE (%s::text IS NULL OR result=%s) "
+                             "ORDER BY id DESC LIMIT %s", (result, result, limit)).fetchall()
+
+    def record_clip(self, media_id: int, quote: str, start: float, end: float, out: str) -> None:
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO aib.clip (media_id, quote, start_s, end_s, output_path) "
+                "VALUES (%s,%s,%s,%s,%s)", (media_id, quote, start, end, out))
+            c.commit()
+
+    # -- status / observability -------------------------------------------
+    def stage_counts(self) -> dict[str, int]:
+        with self.conn() as c:
+            rows = c.execute("SELECT stage, count(*) AS n FROM aib.media_file "
+                             "WHERE NOT missing AND kind='video' GROUP BY stage").fetchall()
+        return {r["stage"]: r["n"] for r in rows}
+
+    def list_by_stage(self, stage: str, limit: int = 100, offset: int = 0) -> list[dict]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT id, path, title, stage, failed_stage, stage_attempts, last_error, "
+                "stage_changed_at FROM aib.media_file WHERE stage=%s AND NOT missing "
+                "ORDER BY stage_changed_at DESC LIMIT %s OFFSET %s",
+                (stage, limit, offset)).fetchall()
+
+    def timeline(self, media_id: int) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.media_event WHERE media_id=%s ORDER BY id",
+                             (media_id,)).fetchall()
+
+    def recent_events(self, limit: int = 50, outcome: str | None = None) -> list[dict]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT e.*, m.path FROM aib.media_event e JOIN aib.media_file m "
+                "ON m.id=e.media_id WHERE (%s::text IS NULL OR e.outcome=%s) "
+                "ORDER BY e.id DESC LIMIT %s", (outcome, outcome, limit)).fetchall()
+
+    def completion_times(self, action: str = "transcribe", limit: int = 200) -> list[Any]:
+        """finished_at of recent successful runs of ``action`` (oldest first) for ETA."""
+        with self.conn() as c:
+            rows = c.execute("SELECT finished_at FROM aib.media_event WHERE action=%s AND "
+                             "outcome='ok' ORDER BY id DESC LIMIT %s", (action, limit)).fetchall()
+        return [r["finished_at"] for r in reversed(rows)]
+
+    def action_durations(self, hours: int = 24) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT action, outcome, count(*) AS n, avg(duration_ms)::bigint AS avg_ms, "
+                "percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::bigint AS p95_ms "
+                "FROM aib.media_event WHERE finished_at > now() - make_interval(hours => %s) "
+                "GROUP BY action, outcome ORDER BY action", (hours,)).fetchall()
