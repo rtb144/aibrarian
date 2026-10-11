@@ -56,6 +56,7 @@ Want a step-by-step checklist? See **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 | `docker-compose.yml` | the stack (profile `devtools`: DeepWiki + Code-Graph-RAG) |
 | `docs/` | architecture, status model, migration, operations, devtools, roadmap |
 | `tests/` | pytest suite (external services mocked; optional real-Postgres tests) |
+| `ci/github-actions-ci.yml` | CI workflow (ruff, pytest + Postgres, image build). To enable it, move it to `.github/workflows/` (needs a token with `workflow` scope) |
 
 ## CLI
 
