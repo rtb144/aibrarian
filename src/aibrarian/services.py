@@ -240,7 +240,7 @@ def pipeline_status(ctx: Context) -> dict[str, Any]:
 
 
 def quarantine_plan(ctx: Context, groups: list[int] | None = None, limit: int | None = None,
-                    cached: bool = False) -> dict[str, Any]:
+                    cached: bool = False, progress=None) -> dict[str, Any]:
     """Dry-run plan for identical groups (read-only)."""
     import json
 
@@ -250,17 +250,73 @@ def quarantine_plan(ctx: Context, groups: list[int] | None = None, limit: int | 
     if cached and f.exists():
         rep = json.loads(f.read_text())
     else:  # fresh exact-only report; does not overwrite the cached full report
+        if progress:
+            progress("building exact-duplicates report (hash cache makes re-runs fast)...")
         rep = duplicates.report(ctx.db.duplicate_candidates(), duplicates.HashCache(ctx.db),
                                 exact_only=True)
     return quarantine.plan(rep, ctx.settings, groups, limit)
 
 
 def quarantine_execute(ctx: Context, groups: list[int] | None = None,
-                       limit: int | None = None) -> dict[str, Any]:
+                       limit: int | None = None, progress=None,
+                       source: str = "cli") -> dict[str, Any]:
+    """Exact (identical) groups only. Fresh report, then per-file sha256 re-check."""
     from . import quarantine
 
-    p = quarantine_plan(ctx, groups, limit)  # always a fresh report before moving
-    return quarantine.execute(p, ctx.db)
+    p = quarantine_plan(ctx, groups, limit, progress=progress)
+    if progress:
+        progress(f"plan: {p['files']} extra copies, {p['total_gb']} GB")
+    return quarantine.execute(p, ctx.db, progress=progress, source=source,
+                             media_root=ctx.settings.media_root)
+
+
+def quarantine_purge(ctx: Context, older_than_days: int | None = None, execute: bool = False,
+                     progress=None, source: str = "cli") -> dict[str, Any]:
+    from . import quarantine
+
+    days = ctx.settings.quarantine_retention_days if older_than_days is None else older_than_days
+    return quarantine.purge(ctx.settings.quarantine_root(), days, execute, ctx.db,
+                            progress=progress, source=source)
+
+
+def cleanup_empty_folders(ctx: Context, execute: bool = False, progress=None,
+                          source: str = "cli") -> dict[str, Any]:
+    from . import quarantine
+
+    return quarantine.cleanup_empty(ctx.settings.quarantine_root(), ctx.settings.media_root,
+                                    execute, ctx.db, source, progress)
+
+
+def dedup_backfill(ctx: Context) -> int:
+    """Idempotently load existing manifests into aib.dedup_action."""
+    from . import quarantine
+
+    return quarantine.backfill_log(ctx.settings.quarantine_root(), ctx.db)
+
+
+def dedup_actions(ctx: Context, action: str | None = None, since: str | None = None,
+                  until: str | None = None, q: str | None = None, limit: int = 50,
+                  offset: int = 0) -> dict[str, Any]:
+    """Read-only: action log page + summary cards."""
+    rows, total = ctx.db.dedup_actions(action or None, since or None, until or None,
+                                       q or None, limit, offset)
+    st = quarantine_status(ctx)
+    tot = ctx.db.dedup_totals()
+    purged = tot.get("purge", {"files": 0, "bytes": 0})
+    return {"summary": {"quarantined_files": st["files"], "quarantined_gb": st["total_gb"],
+                        "purged_files": purged["files"],
+                        "purged_gb": round(purged["bytes"] / 1e9, 2),
+                        "next_purge_run": st["next_purge_run"],
+                        "retention_days": st["retention_days"],
+                        "by_action": tot},
+            "total": total, "limit": limit, "offset": offset, "actions": rows}
+
+
+def quarantine_status(ctx: Context) -> dict[str, Any]:
+    from . import quarantine
+
+    return quarantine.status(ctx.settings.quarantine_root(),
+                             ctx.settings.quarantine_retention_days)
 
 
 def duplicates_report(ctx: Context, exact_only: bool = False,

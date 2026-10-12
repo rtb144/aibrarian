@@ -179,6 +179,14 @@ you go (edit this file, or copy it into Obsidian).
   Do: `dc exec aibrarian-api aibrarian cleanup-skipped`, check the output, then add `--apply`.
   Done when: the dry-run list looked right and the `--apply` run shows `ok` rows.
 
+- [x] **5.4b Quarantine identical duplicates (first batch: 3 files, 50.74 GB, still playable).**
+  Do: `dc exec aibrarian-api aibrarian duplicates quarantine --limit 3` then `--execute`.
+
+- [ ] **5.4c Let the automation run.** `dedup-quarantine` (Sun 05:00 UTC) quarantines identical
+  copies in batches of `DEDUP_BATCH_LIMIT`; `quarantine-purge` (daily 04:37 UTC) deletes them
+  after `QUARANTINE_RETENTION_DAYS` (30). Watch `/dedup/ui`.
+  Done when: a week's runs show `quarantine` rows and no `error` rows.
+
 - [ ] **5.5 Repair old orphaned subtitles.**
   Do: `dc exec aibrarian-api aibrarian srt-report --log /data/old-reports/<move_log>.jsonl` then `sync-subtitles --log … --apply`
   Done when: re-running `srt-report` shows fewer `lost_after_move` entries.

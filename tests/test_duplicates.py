@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -209,3 +210,214 @@ def test_quarantine_skips_when_bytes_differ(tmp_path):
     extra.write_bytes(bytes(data))
     res = q.execute(p)
     assert res["moved"] == 0 and res["results"][0]["reason"] == "sha256 differs" and extra.exists()
+
+
+class PDB(QDB):
+    def purge_media(self, mid, path, started, details):
+        self.events.append(("purged", mid, path))
+
+
+def test_purge_retention_safety_and_status(tmp_path):
+    from datetime import UTC, date, datetime, timedelta
+
+    from aibrarian import quarantine as q
+    from aibrarian.config import Settings
+
+    media = tmp_path / "media"
+    s = Settings(_env_file=None, media_root=media)
+    rep = d.report(library(media), d.HashCache(), exact_only=True)
+    p = q.plan(rep, s, day=date(2026, 9, 1))
+    db = PDB()
+    progress = []
+    res = q.execute(p, db, progress=progress.append)
+    assert res["moved"] == 1 and any("verifying" in m for m in progress)
+    root = s.quarantine_root()
+    batch = root / "2026-09-01"
+    qfile = Path(p["items"][0]["quarantine_path"])
+    # an unlisted file in quarantine is never touched
+    stray = batch / "stray.mkv"
+    stray.write_bytes(b"x")
+    moved = datetime.fromisoformat(q._jsonl(batch / "manifest.jsonl")[0]["moved_at"])
+
+    st = q.status(root, 30, now=moved + timedelta(days=5))
+    assert st["files"] == 1 and st["items"][0]["age_days"] == 5.0
+    assert st["items"][0]["purge_on"] >= str(moved + timedelta(days=30))[:10]
+
+    young = q.purge(root, 30, execute=True, db=db, now=moved + timedelta(days=5))
+    assert young["deleted"] == 0 and qfile.exists()
+    dry = q.purge(root, 30, now=moved + timedelta(days=31))
+    assert dry["would_delete"] == 1 and qfile.exists()                # dry run deletes nothing
+    assert q.purge(root, 0, execute=False, now=moved + timedelta(seconds=1))["would_delete"] == 1
+
+    # a manifest entry pointing outside the quarantine dir is refused
+    outside = tmp_path / "outside.mkv"
+    outside.write_bytes(b"keep me")
+    with (batch / "manifest.jsonl").open("a") as fh:
+        fh.write(json.dumps({"moved_at": moved.isoformat(), "path": "/x/y.mkv",
+                             "quarantine_path": str(outside), "size_bytes": 7}) + "\n")
+    link = batch / "link.mkv"
+    link.symlink_to(outside)
+    with (batch / "manifest.jsonl").open("a") as fh:
+        fh.write(json.dumps({"moved_at": moved.isoformat(), "path": "/x/z.mkv",
+                             "quarantine_path": str(link), "size_bytes": 7}) + "\n")
+
+    done = q.purge(root, 30, execute=True, db=db, now=moved + timedelta(days=31))
+    assert done["deleted"] == 1 and not qfile.exists() and outside.exists() and stray.exists()
+    assert ("purged", p["items"][0]["media_id"], str(qfile)) in db.events
+    assert sum(i["result"] == "skipped" for i in done["items"]) == 2
+    assert batch.exists()                                             # stray + link keep it
+    stray.unlink()
+    link.unlink()
+    lines = (batch / "manifest.jsonl").read_text().splitlines()[:1]   # drop the fake entries
+    (batch / "manifest.jsonl").write_text("\n".join(lines) + "\n")
+    again = q.purge(root, 30, execute=True, now=moved + timedelta(days=32))
+    assert again["deleted"] == 0 and again["removed_batch_dirs"] == [str(batch)]
+    assert not batch.exists() and (root / ".manifests" / "2026-09-01" / "purged.jsonl").exists()
+    assert q.next_cron_run(datetime(2026, 10, 12, 4, 0, tzinfo=UTC)) == \
+        datetime(2026, 10, 12, 4, 37, tzinfo=UTC)
+    assert q.next_cron_run(datetime(2026, 10, 12, 5, 0, tzinfo=UTC)).day == 13
+
+
+def test_purge_age_falls_back_to_folder_date(tmp_path):
+    from datetime import UTC, datetime
+
+    from aibrarian import quarantine as q
+
+    root = tmp_path / "_quarantine"
+    b = root / "2026-08-01"
+    (b / "m").mkdir(parents=True)
+    f = b / "m" / "a.mkv"
+    f.write_bytes(b"1")
+    (b / "manifest.jsonl").write_text(json.dumps({"path": "/media/m/a.mkv",
+                                                  "quarantine_path": str(f)}) + "\n")
+    r = q.purge(root, 30, execute=True, now=datetime(2026, 9, 15, tzinfo=UTC))
+    assert r["deleted"] == 1 and not f.exists() and not b.exists()
+
+
+class LogDB(PDB):
+    def __init__(self):
+        super().__init__()
+        self.actions = []
+
+    def record_dedup_action(self, row):
+        key = (row["action"], row["file_path"], str(row["ts"]))
+        if key not in {(a["action"], a["file_path"], str(a["ts"])) for a in self.actions}:
+            self.actions.append(dict(row))
+
+    def dedup_actions(self, action, since, until, q, limit, offset):
+        rows = [a for a in reversed(self.actions) if not action or a["action"] == action]
+        return rows[offset:offset + limit], len(rows)
+
+    def dedup_totals(self):
+        out = {}
+        for a in self.actions:
+            t = out.setdefault(a["action"], {"files": 0, "bytes": 0})
+            t["files"] += 1
+            t["bytes"] += a.get("size_bytes") or 0
+        return out
+
+
+def test_action_log_db_file_backfill_and_ui(ctx, settings):
+    from datetime import date, timedelta
+
+    from aibrarian import quarantine as q
+
+    media = settings.media_root
+    rows = library(media)
+    db = LogDB()
+    p = q.plan(d.report(rows, d.HashCache(), exact_only=True), settings, day=date(2026, 10, 12))
+    q.execute(p, db, source="prefect:abc")
+    root = settings.quarantine_root()
+    logf = root / q.ACTION_LOG
+    first = json.loads(logf.read_text().splitlines()[0])
+    assert first["action"] == "quarantine" and first["source"] == "prefect:abc" and first["sha256"]
+    assert db.actions[0]["sidecars_copied"] and db.actions[0]["group_no"] == 1
+    # purge everything: the log survives, gets a purge line, DB gets a purge row
+    moved = datetime_of(root)
+    q.purge(root, 0, execute=True, db=db, now=moved + timedelta(days=1))
+    assert logf.exists() and json.loads(logf.read_text().splitlines()[-1])["action"] == "purge"
+    assert [a["action"] for a in db.actions] == ["quarantine", "purge"]
+    # backfill is idempotent: manifests (now archived) map to the same rows
+    fresh = LogDB()
+    assert q.backfill_log(root, fresh) == 2 and q.backfill_log(root, fresh) == 2
+    assert sorted(a["action"] for a in fresh.actions) == ["purge", "quarantine"]
+
+    ctx.db = db
+    c = TestClient(create_app(ctx, migrate=False))
+    r = c.get("/dedup/actions", params={"action": "purge"}).json()
+    assert r["total"] == 1 and r["summary"]["purged_files"] == 1
+    assert r["summary"]["quarantined_files"] == 0 and r["summary"]["retention_days"] == 30
+    html = c.get("/dedup/ui").text
+    assert "Dedup actions (read-only)" in html and "method" not in html.lower().split("<script>")[0]
+    assert "dedup/ui" in c.get("/dashboard").text and "dedup/ui" in c.get("/duplicates/ui").text
+
+
+def datetime_of(root):
+    from datetime import datetime
+
+    from aibrarian import quarantine as q
+
+    b = next(iter(q._batches(root)))
+    return datetime.fromisoformat(q._jsonl(b / "manifest.jsonl")[0]["moved_at"])
+
+
+def test_empty_source_folders_removed_and_restored(tmp_path):
+    from datetime import date
+
+    from aibrarian import quarantine as q
+    from aibrarian.config import Settings
+
+    media = tmp_path / "media"
+    rows = library(media)
+    s = Settings(_env_file=None, media_root=media)
+    old_dir = media / "01-movies/5lbs.Of.Pressure (2024)"
+    (old_dir / "poster.jpg").write_bytes(b"img")
+    (old_dir / "extras").mkdir()
+    (old_dir / "extras" / "Thumbs.db").write_bytes(b"t")
+    p = q.plan(d.report(rows, d.HashCache(), exact_only=True), s, day=date(2026, 10, 12))
+    db = LogDB()
+    res = q.execute(p, db, media_root=media)
+    # .srt was the copy's own sidecar and moved with it -> folder had only junk left
+    assert res["folders_removed"] == [str(old_dir)] and not old_dir.exists()
+    assert (media / "01-movies").is_dir()                              # library root kept
+    batch = Path(res["batch_dir"])
+    assert (batch / "01-movies/5lbs.Of.Pressure (2024)/poster.jpg").exists()   # junk kept
+    assert "folder_removed" in [a["action"] for a in db.actions]
+    assert "removed empty folder" in q.format_plan(res)
+
+    r = q.restore(batch / "manifest.jsonl", execute=True, db=db)
+    assert r["restored"] == 1 and r["folders_recreated"] == 1
+    assert (old_dir / "poster.jpg").exists() and (old_dir / "extras" / "Thumbs.db").exists()
+
+
+def test_cleanup_empty_one_off_rules(tmp_path):
+    from datetime import date
+
+    from aibrarian import quarantine as q
+    from aibrarian.config import Settings
+
+    media = tmp_path / "media"
+    rows = library(media)
+    s = Settings(_env_file=None, media_root=media)
+    p = q.plan(d.report(rows, d.HashCache(), exact_only=True), s, day=date(2026, 10, 12))
+    q.execute(p)                                   # old behaviour: no folder cleanup
+    old_dir = media / "01-movies/5lbs.Of.Pressure (2024)"
+    (old_dir / "movie.nfo").write_bytes(b"n")
+    (old_dir / "keep.eng.srt").write_bytes(b"1")  # subtitles make it non-empty
+    root = s.quarantine_root()
+    assert q.cleanup_empty(root, media)["would_remove"] == 0
+    (old_dir / "keep.eng.srt").unlink()
+    dry = q.cleanup_empty(root, media)
+    assert dry["would_remove"] == 1 and old_dir.exists()               # dry run
+    done = q.cleanup_empty(root, media, execute=True)
+    assert done["removed"] == 1 and not old_dir.exists()
+    assert (root / "2026-10-12/01-movies/5lbs.Of.Pressure (2024)/movie.nfo").exists()
+    # library roots and media_root itself are never removable
+    empty_root = media / "05-instructional_videos"
+    empty_root.mkdir()
+    assert not q._removable(empty_root, media, root) and not q._removable(media, media, root)
+    assert not q._removable(tmp_path / "elsewhere", media, root)
+    # purge later deletes the quarantined leftovers too, then drops the batch dir
+    from datetime import UTC, datetime, timedelta
+    q.purge(root, 30, execute=True, now=datetime.now(UTC) + timedelta(days=31))
+    assert not (root / "2026-10-12").exists() and (root / q.ACTION_LOG).exists()

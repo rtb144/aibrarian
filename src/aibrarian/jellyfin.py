@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from aibrarian import __version__
+
 from .config import Settings
 
 log = logging.getLogger(__name__)

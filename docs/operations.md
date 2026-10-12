@@ -151,3 +151,70 @@ dc exec aibrarian-api aibrarian duplicates restore --manifest /media/_quarantine
 - `/duplicates/ui` shows a read-only quarantine preview (`GET /duplicates/quarantine-plan`);
   there is no button that moves files.
 - Once you're happy (e.g. Jellyfin plays the keepers), delete the dated folder by hand.
+
+### Progress output
+
+`duplicates quarantine` prints one progress line per file on stderr (flushed):
+`[k/n] group G: verifying sha256 (X GB x2) <path>`, then `moved -> …` / `SKIPPED (reason)`.
+Building the exact-only report comes first and can take a few minutes on the first run.
+
+### Empty source folders
+
+After `--execute` (CLI and the `dedup-quarantine` flow) the original folder of each moved
+copy is removed when nothing but leftovers remains: `.nfo .jpg .jpeg .png .txt .url`,
+`Thumbs.db`, `.DS_Store` (subtitles `.srt/.ass/.sub/.idx` or any other file keep it).
+Leftovers are **moved** into the same dated quarantine folder (never deleted outright), then
+the parent folders are checked the same way. `/media` itself, the library roots
+(`/media/01-movies` …, anything less than two levels deep), the quarantine dir and anything
+outside `/media` are never removed. Each removal is a `folder_removed` row in the action log;
+`restore` recreates the folders and puts the leftovers back.
+
+One-off for batches moved before this existed:
+
+```bash
+dc exec aibrarian-api aibrarian duplicates cleanup-empty            # dry run
+dc exec aibrarian-api aibrarian duplicates cleanup-empty --execute
+```
+
+## Automatic dedup and retention (Prefect)
+
+| Deployment | Schedule (UTC) | What |
+|---|---|---|
+| `duplicates` | Sun 04:00 | read-only report |
+| `dedup-quarantine` | Sun 05:00 | `duplicates quarantine --execute` for **identical groups only** (never review groups): fresh sha256 re-check, sidecars copied to keeper, empty folders removed |
+| `quarantine-purge` | daily 04:37 | **permanently deletes** quarantined copies older than `QUARANTINE_RETENTION_DAYS` |
+
+All run with concurrency 1 / CANCEL_NEW on the cpu worker (`aibrarian-worker`).
+
+`.env` knobs (passed through docker-compose.yml):
+
+- `DEDUP_AUTO_ENABLED=true`: set `false` to make `dedup-quarantine` a no-op.
+- `DEDUP_BATCH_LIMIT=50`: extra copies per weekly run (`0` = unlimited).
+- `QUARANTINE_RETENTION_DAYS=30`.
+
+Purge rules: age comes from `moved_at` in the manifest (fallback: the dated folder name);
+only files listed in a manifest (`manifest.jsonl` / `folders.jsonl`) are deleted, only if they
+resolve inside `QUARANTINE_DIR` and aren't symlinks. Each purge adds a `purged` event in
+`aib.media_event` and sets `aib.media_file.purged_at` (stage stays `skipped`). Emptied dated
+folders are removed; their manifests are archived in `QUARANTINE_DIR/.manifests/<date>/`.
+
+```bash
+dc exec aibrarian-api aibrarian duplicates purge                       # dry run, uses retention
+dc exec aibrarian-api aibrarian duplicates purge --older-than-days 0    # dry run: what is in there
+dc exec aibrarian-api aibrarian duplicates purge --execute
+dc exec aibrarian-api aibrarian duplicates quarantine-status            # contents, age, purge dates
+```
+
+## Dedup action log
+
+Every quarantine / skip / error / restore / purge / folder_removed is recorded in
+`aib.dedup_action` (time, group, keeper, file, quarantine path, size, sha256, sidecars,
+reason, source `cli` or `prefect:<flow run id>`) **and** appended to
+`QUARANTINE_DIR/dedup-actions.log` (JSONL; purge never touches it). Manifests written before
+the table existed are back-filled automatically when the API or worker starts (idempotent).
+
+- Page: `http://z8g4:8790/dedup/ui` (summary cards, filters by action/date/title, paging;
+  read-only). Linked from `/dashboard` and `/duplicates/ui`.
+- JSON: `GET /dedup/actions?action=&since=&until=&q=&limit=&offset=`.
+- `/duplicates/ui` also shows what is in quarantine, its age and the next purge run
+  (`GET /duplicates/quarantine`).

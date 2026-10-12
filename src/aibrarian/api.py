@@ -19,10 +19,11 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from aibrarian import __version__
+
 from . import services
 from .actions import Context, RetryableError, run_action
 from .config import get_settings
-from .dashboard import DASHBOARD_HTML, DUPLICATES_UI_HTML, SEARCH_UI_HTML
+from .dashboard import DASHBOARD_HTML, DEDUP_UI_HTML, DUPLICATES_UI_HTML, SEARCH_UI_HTML
 from .metrics import SUGGESTIONS_OPEN, refresh_stage_gauges
 from .status import ACTIONS, Stage
 from .titles import TitleNotResolved
@@ -52,6 +53,10 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
             applied = c().db.migrate()
             if applied:
                 log.info("migrations applied", extra={"versions": applied})
+            try:  # load quarantine manifests written before aib.dedup_action existed
+                services.dedup_backfill(c())
+            except Exception as exc:
+                log.warning("dedup backfill failed", extra={"error": str(exc)})
         yield
 
     app = FastAPI(title="aibrarian", version=__version__, lifespan=lifespan)
@@ -267,6 +272,22 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
                         group: Annotated[list[int] | None, Query()] = None):
         """Read-only dry-run preview of `aibrarian duplicates quarantine`. Moves nothing."""
         return services.quarantine_plan(c(), group, limit, cached)
+
+    @app.get("/duplicates/quarantine")
+    def quarantine_status():
+        """Read-only: files in quarantine, their age, purge dates, next purge run."""
+        return services.quarantine_status(c())
+
+    @app.get("/dedup/actions")
+    def dedup_actions(action: str | None = None, since: str | None = None,
+                      until: str | None = None, q: str | None = None,
+                      limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
+        """Read-only dedup action log (newest first) + summary."""
+        return services.dedup_actions(c(), action, since, until, q, limit, offset)
+
+    @app.get("/dedup/ui", response_class=HTMLResponse)
+    def dedup_ui() -> str:
+        return DEDUP_UI_HTML
 
     @app.get("/duplicates/ui", response_class=HTMLResponse)
     def duplicates_ui() -> str:

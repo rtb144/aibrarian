@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # Must be on the same filesystem as media_root so moves are instant renames.
     quarantine_dir: Path | None = Field(
         None, validation_alias=_env("quarantine_dir", "QUARANTINE_DIR"))
+    dedup_auto_enabled: bool = Field(
+        True, validation_alias=_env("dedup_auto_enabled", "DEDUP_AUTO_ENABLED"))
+    dedup_batch_limit: int = Field(  # extra copies per weekly run; 0 = unlimited
+        50, validation_alias=_env("dedup_batch_limit", "DEDUP_BATCH_LIMIT"))
+    quarantine_retention_days: int = Field(
+        30, validation_alias=_env("quarantine_retention_days", "QUARANTINE_RETENTION_DAYS"))
     clips_dir: Path = Field(Path("/data/clips"), validation_alias=_env("clips_dir", "OUT_DIR"))
     work_dir: Path = Path("/media/ffmpeg_workspace/aibrarian")  # temp WAVs
     calibre_dir: Path = Path("/books")

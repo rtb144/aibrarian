@@ -21,6 +21,8 @@ from prefect import flow, serve, task
 from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
 from prefect.runtime import flow_run, task_run
 
+from aibrarian.quarantine import PURGE_CRON
+
 from . import services
 from .actions import Context, discover, run_action
 from .config import get_settings
@@ -141,6 +143,33 @@ def duplicates_flow(exact_only: bool = False) -> dict:
     return duplicates_report(ctx(), exact_only)["summary"]
 
 
+@flow(name="dedup-quarantine", log_prints=True)
+def dedup_quarantine_flow(limit: int | None = None) -> dict:
+    """Move extra copies of IDENTICAL groups to quarantine (never review groups, never
+    deletes). Each copy's sha256 is re-verified right before the move. Off when
+    DEDUP_AUTO_ENABLED=false; batch size DEDUP_BATCH_LIMIT (0 = unlimited)."""
+    from aibrarian.services import quarantine_execute
+
+    s = get_settings()
+    if not s.dedup_auto_enabled:
+        log.info("dedup-quarantine disabled (DEDUP_AUTO_ENABLED=false)")
+        return {"enabled": False}
+    n = limit if limit is not None else (s.dedup_batch_limit or None)
+    res = quarantine_execute(ctx(), None, n, progress=log.info,
+                             source=f"prefect:{_run_ids()[0]}")
+    return {k: v for k, v in res.items() if k != "results"}
+
+
+@flow(name="quarantine-purge", log_prints=True)
+def quarantine_purge_flow(older_than_days: int | None = None, execute: bool = True) -> dict:
+    """Permanently delete quarantined copies older than QUARANTINE_RETENTION_DAYS."""
+    from aibrarian.services import quarantine_purge
+
+    res = quarantine_purge(ctx(), older_than_days, execute, progress=log.info,
+                           source=f"prefect:{_run_ids()[0]}")
+    return {k: v for k, v in res.items() if k != "items"}
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -173,6 +202,8 @@ def deployments(group: str) -> list:
            retry_failed_flow.to_deployment("retry-failed", **one),
            reprobe_flow.to_deployment("reprobe", **one),
            duplicates_flow.to_deployment("duplicates", cron="0 4 * * 0", **one),
+           dedup_quarantine_flow.to_deployment("dedup-quarantine", cron="0 5 * * 0", **one),
+           quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]
 
@@ -187,6 +218,10 @@ def main(argv: list[str] | None = None) -> None:
     if argv and argv[0] == "serve":
         group = argv[1] if len(argv) > 1 else "all"
         ctx().db.migrate()
+        try:
+            services.dedup_backfill(ctx())
+        except Exception as exc:
+            log.warning("dedup backfill failed", extra={"error": str(exc)})
         start_http_server(int(os.getenv("AIB_METRICS_PORT", "9108")))
         serve(*deployments(group))
     else:

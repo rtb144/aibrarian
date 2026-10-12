@@ -255,6 +255,55 @@ class Database:
                        json.dumps({"from": quarantine_path, "to": path})))
             c.commit()
 
+    def purge_media(self, media_id: int, path: str, started_at: Any,
+                    details: dict[str, Any]) -> None:
+        """A quarantined copy was permanently deleted: stage stays skipped."""
+        with self.conn() as c:
+            c.execute("UPDATE aib.media_file SET purged_at=now(), missing=TRUE, "
+                      "last_error=%s WHERE id=%s AND path=%s",
+                      (f"purged from quarantine ({details.get('age_days')} days)", media_id, path))
+            c.execute("""INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,
+                           outcome, started_at, details) VALUES (%s,'purged','skipped','skipped',
+                           'ok',%s,%s)""",
+                      (media_id, started_at, json.dumps(details | {"path": path})))
+            c.commit()
+
+    DEDUP_COLS = ("ts", "action", "group_no", "media_id", "keeper_path", "file_path",
+                  "quarantine_path", "size_bytes", "sha256", "sidecars_copied", "reason",
+                  "source")
+
+    def record_dedup_action(self, row: dict[str, Any]) -> None:
+        """Insert one aib.dedup_action row; duplicates (same action/path/ts) are ignored."""
+        vals = [json.dumps(row.get(k) or []) if k == "sidecars_copied" else row.get(k)
+                for k in self.DEDUP_COLS]
+        with self.conn() as c:
+            c.execute(f"INSERT INTO aib.dedup_action ({', '.join(self.DEDUP_COLS)}) VALUES "
+                      f"(COALESCE(%s, now()),{','.join(['%s'] * (len(vals) - 1))}) "
+                      "ON CONFLICT DO NOTHING", vals)
+            c.commit()
+
+    def dedup_actions(self, action: str | None = None, since: Any = None, until: Any = None,
+                      q: str | None = None, limit: int = 50,
+                      offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        where = ("(%(a)s::text IS NULL OR action=%(a)s) AND (%(s)s::timestamptz IS NULL OR "
+                 "ts>=%(s)s) AND (%(u)s::timestamptz IS NULL OR ts<%(u)s) AND (%(q)s::text "
+                 "IS NULL OR file_path ILIKE %(ql)s OR keeper_path ILIKE %(ql)s)")
+        p = {"a": action, "s": since, "u": until, "q": q, "ql": f"%{q}%",
+             "lim": limit, "off": offset}
+        with self.conn() as c:
+            rows = c.execute(f"SELECT * FROM aib.dedup_action WHERE {where} "
+                             "ORDER BY ts DESC, id DESC LIMIT %(lim)s OFFSET %(off)s",
+                             p).fetchall()
+            total = c.execute(f"SELECT count(*) AS n FROM aib.dedup_action WHERE {where}",
+                              p).fetchone()["n"]
+        return rows, total
+
+    def dedup_totals(self) -> dict[str, dict[str, int]]:
+        with self.conn() as c:
+            rows = c.execute("SELECT action, count(*) AS n, COALESCE(sum(size_bytes),0) AS b "
+                             "FROM aib.dedup_action GROUP BY action").fetchall()
+        return {r["action"]: {"files": r["n"], "bytes": int(r["b"])} for r in rows}
+
     def audio_layout_counts(self) -> dict[str, int]:
         with self.conn() as c:
             rows = c.execute("SELECT coalesce(audio_layout, 'unknown') AS l, count(*) AS n "

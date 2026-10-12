@@ -23,6 +23,11 @@ def _print(obj: Any) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _say(msg: str) -> None:
+    """Progress line on stderr, flushed (stdout stays clean for the plan/JSON)."""
+    print(msg, file=sys.stderr, flush=True)
+
+
 def _records(log_path: Path | None, ctx) -> list[dict]:
     from . import fileops
 
@@ -87,6 +92,15 @@ def build_parser() -> argparse.ArgumentParser:
     dq.add_argument("--limit", type=int, help="max extra copies to handle")
     dq.add_argument("--execute", action="store_true", help="actually move the files")
     dq.add_argument("--json", action="store_true", help="full JSON instead of a table")
+    dg = dps.add_parser("purge", help="permanently delete quarantined copies older than "
+                        "QUARANTINE_RETENTION_DAYS (dry run unless --execute)")
+    dg.add_argument("--older-than-days", type=int, help="override QUARANTINE_RETENTION_DAYS")
+    dg.add_argument("--execute", action="store_true", help="really delete")
+    dg.add_argument("--json", action="store_true")
+    de = dps.add_parser("cleanup-empty", help="remove original folders of quarantined copies "
+                        "that hold no media (junk moved to quarantine; dry run unless --execute)")
+    de.add_argument("--execute", action="store_true")
+    dps.add_parser("quarantine-status", help="what is in quarantine, age, purge dates")
     dr = dps.add_parser("restore", help="move quarantined files back using a manifest")
     dr.add_argument("--manifest", type=Path, required=True,
                     help="<quarantine>/<date>/manifest.jsonl")
@@ -264,10 +278,24 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         from .quarantine import format_plan
 
         if args.execute:
-            res = services.quarantine_execute(ctx, args.group, args.limit)
+            res = services.quarantine_execute(ctx, args.group, args.limit, progress=_say)
         else:
-            res = services.quarantine_plan(ctx, args.group, args.limit)
+            res = services.quarantine_plan(ctx, args.group, args.limit, progress=_say)
         print(json.dumps(res, indent=2, default=str) if args.json else format_plan(res))
+    elif cmd == "duplicates" and args.dup_cmd == "purge":
+        res = services.quarantine_purge(ctx, args.older_than_days, args.execute, progress=_say)
+        if args.json:
+            _print(res)
+        else:
+            verb = "deleted" if args.execute else "would delete (dry run, add --execute)"
+            n = res["deleted"] if args.execute else res["would_delete"]
+            print(f"{verb}: {n} files older than {res['older_than_days']} days in {res['root']}; "
+                  f"kept {sum(i['result'] == 'kept' for i in res['items'])}; "
+                  f"freed {res['freed_gb']} GB; removed dirs {res['removed_batch_dirs']}")
+    elif cmd == "duplicates" and args.dup_cmd == "cleanup-empty":
+        _print(services.cleanup_empty_folders(ctx, args.execute, progress=_say))
+    elif cmd == "duplicates" and args.dup_cmd == "quarantine-status":
+        _print(services.quarantine_status(ctx))
     elif cmd == "duplicates" and args.dup_cmd == "restore":
         from .quarantine import restore
 

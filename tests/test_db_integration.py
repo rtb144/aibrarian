@@ -23,7 +23,8 @@ def db():
     with d.conn() as c:
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
-    assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop", "004_file_hash"]
+    assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop", "004_file_hash",
+                           "005_purged", "006_dedup_action"]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -172,3 +173,30 @@ def test_file_hash_cache_and_candidates(db):
     db.put_file_hash("/p", 10, 1.5, "s", None)
     db.put_file_hash("/p", 10, 1.5, "s", "h")
     assert db.get_file_hash("/p")["sha256"] == "h"
+
+
+def test_quarantine_purge_and_dedup_action_log(db):
+    mid = db.upsert_media([mf("/m/01-movies/dup.mkv")])[0]["id"]
+    now = datetime.now(UTC)
+    db.quarantine_media(mid, "/m/01-movies/dup.mkv", "/m/_quarantine/d/01-movies/dup.mkv", now,
+                        {"keeper": "/m/01-movies/k.mkv", "group": 1})
+    row = db.get_media(mid)
+    assert row["stage"] == "skipped" and row["missing"] and row["path"].startswith("/m/_q")
+    db.restore_media(mid, row["path"], "/m/01-movies/dup.mkv", "discovered", now)
+    assert db.get_media(mid)["path"] == "/m/01-movies/dup.mkv" and not db.get_media(mid)["missing"]
+    db.quarantine_media(mid, "/m/01-movies/dup.mkv", "/m/_q/dup.mkv", now, {"keeper": "k"})
+    db.purge_media(mid, "/m/_q/dup.mkv", now, {"age_days": 31})
+    assert db.get_media(mid)["purged_at"] is not None and db.get_media(mid)["stage"] == "skipped"
+    assert [e["action"] for e in db.timeline(mid)][-4:] == [
+        "quarantine", "restore", "quarantine", "purged"]
+
+    base = {"file_path": "/m/01-movies/dup.mkv", "size_bytes": 10, "source": "cli"}
+    db.record_dedup_action(base | {"action": "quarantine", "ts": "2026-10-12T08:00:00+00:00",
+                                   "sidecars_copied": ["/m/k.srt"], "sha256": "ab"})
+    db.record_dedup_action(base | {"action": "quarantine", "ts": "2026-10-12T08:00:00+00:00"})
+    db.record_dedup_action(base | {"action": "purge", "ts": None})
+    rows, total = db.dedup_actions()
+    assert total == 2 and rows[0]["action"] == "purge" and rows[1]["sidecars_copied"] == ["/m/k.srt"]
+    assert db.dedup_actions(action="quarantine", q="DUP")[1] == 1
+    assert db.dedup_actions(since="2030-01-01")[1] == 0
+    assert db.dedup_totals()["purge"] == {"files": 1, "bytes": 10}

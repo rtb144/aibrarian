@@ -17,7 +17,7 @@ DASHBOARD_HTML = """<!doctype html>
 <h1>aibrarian &middot; media pipeline</h1>
 <div id="summary" class="muted">loading&hellip;</div>
 <div class="cards" id="stages"></div>
-<p><a href="search/ui">Quote search</a> · <a href="duplicates/ui">Duplicates report</a></p>
+<p><a href="search/ui">Quote search</a> · <a href="duplicates/ui">Duplicates report</a> · <a href="dedup/ui">Dedup actions</a></p>
 <h2>Audio layouts</h2><div class="cards" id="layouts"></div>
 <h2 id="listTitle">Failures</h2><table id="list"></table>
 <h2>Timeline <span id="tlTitle" class="muted"></span></h2><table id="timeline"></table>
@@ -135,9 +135,9 @@ td,th{border-bottom:1px solid #ddd;padding:.25rem .4rem;text-align:left;font-siz
 tr.keep{background:#eaffea}.grp{margin-top:1rem;font-weight:600}.warn{color:#a60}
 </style></head><body>
 <h1>Duplicates (read-only)</h1>
-<p><a href="../dashboard">dashboard</a> · Nothing is deleted or moved. "keep" is a suggestion only.
+<p><a href="../dashboard">dashboard</a> · <a href="../dedup/ui">dedup actions log</a> · Nothing is deleted or moved. "keep" is a suggestion only.
 <button onclick="load(false)">Re-scan now</button> <label><input type="checkbox" id="exact"> identical only</label></p>
-<div class="cards" id="sum">loading...</div><div id="qp"></div><div id="out"></div>
+<div class="cards" id="sum">loading...</div><div id="qs"></div><div id="qp"></div><div id="out"></div>
 <script>
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const gb=b=>(b/1e9).toFixed(2)+" GB";
@@ -162,7 +162,57 @@ async function load(cached){
   ["review groups",s.review_groups],["review (if all extra copies removed)",gb(s.review_reclaimable_bytes)],["files",s.files_scanned]]
   .map(([k,v])=>`<div class="card"><b>${v}</b>${k}</div>`).join("");
  document.getElementById("out").innerHTML=section("Identical (byte-for-byte)",r.identical)+section("Likely duplicates - review",r.review);
+ try{const z=await (await fetch("../duplicates/quarantine")).json();
+ document.getElementById("qs").innerHTML=`<h2>In quarantine (read-only)</h2><p>${z.files} files, ${z.total_gb} GB in <code>${esc(z.root)}</code>.
+ Retention ${z.retention_days} days; next purge run ${esc(z.next_purge_run)} (deployment quarantine-purge).</p>`+
+ (z.items.length?`<table><tr><th>original path</th><th>size</th><th>moved</th><th>age (days)</th><th>purged on</th></tr>`+
+ z.items.map(i=>`<tr><td>${esc(i.path)}</td><td>${gb(i.size_bytes)}</td><td>${esc(i.moved_at)}</td><td>${i.age_days}</td><td>${esc(i.purge_on)}</td></tr>`).join("")+`</table>`:"");}catch(e){}
  const q=await (await fetch("../duplicates/quarantine-plan?cached=true")).json();
  document.getElementById("qp").innerHTML=`<h2>Quarantine preview (dry run, read-only)</h2><p>${q.files} extra copies in ${q.groups} identical groups, ${q.total_gb} GB would move to <code>${esc(q.batch_dir)}</code>. Run <code>aibrarian duplicates quarantine --limit 3</code> on the server to review, then add <code>--execute</code>. This page never moves files.</p>`;}
 load(true);
+</script></body></html>"""
+
+
+DEDUP_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian dedup actions</title><style>
+body{font-family:system-ui,sans-serif;margin:1.5rem}
+.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{border:1px solid #ccc;border-radius:6px;padding:.6rem 1rem}
+.card b{display:block;font-size:1.4rem}table{border-collapse:collapse;width:100%;margin:.6rem 0}
+td,th{border-bottom:1px solid #ddd;padding:.25rem .4rem;text-align:left;font-size:.85rem;vertical-align:top}
+.a-quarantine{color:#06c}.a-purge{color:#a00}.a-restore{color:#080}.a-skip{color:#a60}.a-error{color:#d00;font-weight:600}
+form>*{margin-right:.5rem}
+</style></head><body>
+<h1>Dedup actions (read-only)</h1>
+<p><a href="../dashboard">dashboard</a> · <a href="../duplicates/ui">duplicates report</a> ·
+This page only shows the log; quarantine/restore/purge run from the CLI or Prefect.</p>
+<div class="cards" id="sum">loading...</div>
+<form id="f" onsubmit="go(0);return false">
+<select id="action"><option value="">all actions</option><option>quarantine</option><option>skip</option>
+<option>restore</option><option>purge</option><option>error</option></select>
+from <input type="date" id="since"> to <input type="date" id="until">
+<input id="q" placeholder="title / path contains"> <button>Filter</button></form>
+<div id="out"></div><p id="pg"></p>
+<script>
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const gb=b=>b==null?"":(b/1e9).toFixed(2)+" GB";const N=50;
+function nextDay(d){if(!d)return "";const t=new Date(d+"T00:00:00Z");t.setUTCDate(t.getUTCDate()+1);return t.toISOString().slice(0,10);}
+async function go(off){
+ const v=id=>document.getElementById(id).value;
+ const p=new URLSearchParams({limit:N,offset:off});
+ if(v("action"))p.set("action",v("action"));if(v("since"))p.set("since",v("since"));
+ if(v("until"))p.set("until",nextDay(v("until")));if(v("q"))p.set("q",v("q"));
+ const r=await (await fetch("../dedup/actions?"+p)).json(),s=r.summary;
+ document.getElementById("sum").innerHTML=[["in quarantine now",s.quarantined_files+" files"],["quarantined size",s.quarantined_gb+" GB"],
+  ["purged to date",s.purged_files+" files"],["purged size",s.purged_gb+" GB"],["next purge run (UTC)",esc(s.next_purge_run).slice(0,16)],
+  ["retention",s.retention_days+" days"]].map(([k,x])=>`<div class="card"><b>${x}</b>${k}</div>`).join("");
+ document.getElementById("out").innerHTML=r.actions.length?`<table><tr><th>time (UTC)</th><th>action</th><th>group</th><th>file</th><th>keeper</th>`+
+  `<th>quarantine path</th><th>size</th><th>sha256</th><th>sidecars copied</th><th>reason</th><th>source</th></tr>`+
+  r.actions.map(a=>`<tr><td>${esc(a.ts).slice(0,19)}</td><td class="a-${esc(a.action)}">${esc(a.action)}</td><td>${esc(a.group_no)}</td>`+
+  `<td>${esc(a.file_path)}</td><td>${esc(a.keeper_path)}</td><td>${esc(a.quarantine_path)}</td><td>${gb(a.size_bytes)}</td>`+
+  `<td title="${esc(a.sha256)}">${esc((a.sha256||"").slice(0,12))}</td><td>${esc((a.sidecars_copied||[]).join(", "))}</td>`+
+  `<td>${esc(a.reason)}</td><td>${esc(a.source)}</td></tr>`).join("")+`</table>`:"<p>no actions</p>";
+ const pg=document.getElementById("pg");pg.innerHTML=`${r.total?off+1:0}-${off+r.actions.length} of ${r.total} `;
+ if(off>0){const b=document.createElement("a");b.href="#";b.textContent="< newer";b.onclick=e=>{e.preventDefault();go(Math.max(0,off-N))};pg.append(b," ");}
+ if(off+N<r.total){const b=document.createElement("a");b.href="#";b.textContent="older >";b.onclick=e=>{e.preventDefault();go(off+N)};pg.append(b);}}
+go(0);
 </script></body></html>"""
