@@ -177,12 +177,17 @@ services:
       SERVER_BASE_URL: ${DEEPWIKI_SERVER_BASE_URL:-http://localhost:8001}
       DEEPWIKI_EMBEDDER_TYPE: ollama
       OLLAMA_HOST: http://ollama:11434
+      # Upstream config copies (deepwiki-open d92819a) with two edits:
+      # embedder model 'nomic-embed-text:latest' (api/rag/rag.py compares names
+      # exactly against /api/tags) and qwen3:14b as the default Ollama generator.
+      DEEPWIKI_CONFIG_DIR: /app/aib-config
     ports:
       - "8001:8001"   # API
       - "3001:3000"   # UI (3000 is Grafana on z8g4)
     volumes:
       - deepwiki_data:/root/.adalflow
       - ./:/app/local-repos/aibrarian:ro
+      - ./docker/deepwiki/config:/app/aib-config:ro
     depends_on: [ollama]
 
   memgraph:

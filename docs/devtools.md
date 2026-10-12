@@ -88,3 +88,19 @@ substitute: it writes protobuf files (`-o` is required), not Memgraph.
 `--no-embeddings` skips semantic embeddings (no Qdrant for cgr in this stack).
 Compose needs `MCP_HTTP_AUTH_TOKEN` and `POSTGRES_PASSWORD` set in `.env` even for
 the devtools profile, because the whole file is validated.
+
+### DeepWiki: "Ollama model 'nomic-embed-text' not found"
+
+`check_ollama_model_exists()` in `api/rag/rag.py` (deepwiki-open d92819a) does an
+exact string compare of the configured embedder model against Ollama's model list,
+which reports `nomic-embed-text:latest`. The stock `api/config/embedder.json` says
+`nomic-embed-text`, so the check fails even though the model is installed.
+Fix (no image change): `docker/deepwiki/config/` holds copies of the upstream
+`embedder.json`, `generator.json`, `repo.json`, `lang.json` and is mounted via
+`DEEPWIKI_CONFIG_DIR` (all four files are read from that dir, so all are copied).
+Edits: embedder model `nomic-embed-text:latest`; Ollama generator default
+`qwen3:14b` (added to the model list). When upgrading the image, re-diff these
+files against upstream `api/config/`.
+
+In the UI: provider **Ollama**, model **qwen3:14b**, repository
+`/app/local-repos/aibrarian` (local path).
