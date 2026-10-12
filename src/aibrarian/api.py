@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
@@ -260,6 +260,12 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
         if cached and f.exists():
             return json.loads(f.read_text())
         return services.duplicates_report(c(), exact_only, duration_tol)
+
+    @app.get("/duplicates/quarantine-plan")
+    def quarantine_plan(cached: bool = True, limit: int | None = Query(None, ge=1),
+                        group: Annotated[list[int] | None, Query()] = None):
+        """Read-only dry-run preview of `aibrarian duplicates quarantine`. Moves nothing."""
+        return services.quarantine_plan(c(), group, limit, cached)
 
     @app.get("/duplicates/ui", response_class=HTMLResponse)
     def duplicates_ui() -> str:

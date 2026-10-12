@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     book_source_dirs: Annotated[list[Path], NoDecode] = Field(
         default_factory=lambda: [Path("/media/book_drop"), Path("/media/downloads")],
         validation_alias=_env("book_source_dirs", "BOOK_SOURCE_DIRS"))
+    # duplicate quarantine root (dated subfolders); default <media_root>/_quarantine.
+    # Must be on the same filesystem as media_root so moves are instant renames.
+    quarantine_dir: Path | None = Field(
+        None, validation_alias=_env("quarantine_dir", "QUARANTINE_DIR"))
     clips_dir: Path = Field(Path("/data/clips"), validation_alias=_env("clips_dir", "OUT_DIR"))
     work_dir: Path = Path("/media/ffmpeg_workspace/aibrarian")  # temp WAVs
     calibre_dir: Path = Path("/books")
@@ -123,6 +127,9 @@ class Settings(BaseSettings):
 
     def library_paths(self) -> list[Path]:
         return [self.media_root / r for r in self.library_roots]
+
+    def quarantine_root(self) -> Path:
+        return self.quarantine_dir or self.media_root / "_quarantine"
 
 
 @lru_cache

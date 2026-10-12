@@ -79,6 +79,19 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--exact-only", action="store_true")
     dp.add_argument("--tsv", action="store_true")
     dp.add_argument("--duration-tol", type=float, default=2.0)
+    dps = dp.add_subparsers(dest="dup_cmd")
+    dq = dps.add_parser("quarantine", help="move extra copies of IDENTICAL groups to the "
+                        "quarantine dir (dry run unless --execute; never deletes)")
+    dq.add_argument("--group", type=int, action="append",
+                    help="identical group number from the report (repeatable)")
+    dq.add_argument("--limit", type=int, help="max extra copies to handle")
+    dq.add_argument("--execute", action="store_true", help="actually move the files")
+    dq.add_argument("--json", action="store_true", help="full JSON instead of a table")
+    dr = dps.add_parser("restore", help="move quarantined files back using a manifest")
+    dr.add_argument("--manifest", type=Path, required=True,
+                    help="<quarantine>/<date>/manifest.jsonl")
+    dr.add_argument("--path", action="append", help="only these (original or quarantine) paths")
+    dr.add_argument("--execute", action="store_true")
 
     rj = sub.add_parser("reject", help="dismiss suggestions by id")
     rj.add_argument("--id", type=int, action="append", required=True)
@@ -247,6 +260,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
                 print("\t".join("" if r[k] is None else str(r[k]) for k in cols))
         else:
             _print(rows)
+    elif cmd == "duplicates" and args.dup_cmd == "quarantine":
+        from .quarantine import format_plan
+
+        if args.execute:
+            res = services.quarantine_execute(ctx, args.group, args.limit)
+        else:
+            res = services.quarantine_plan(ctx, args.group, args.limit)
+        print(json.dumps(res, indent=2, default=str) if args.json else format_plan(res))
+    elif cmd == "duplicates" and args.dup_cmd == "restore":
+        from .quarantine import restore
+
+        _print(restore(args.manifest, args.execute, ctx.db, args.path))
     elif cmd == "duplicates":
         from .duplicates import to_tsv
 

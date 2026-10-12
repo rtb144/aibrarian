@@ -174,6 +174,7 @@ def discover(ctx: Context, roots: list[str] | None = None) -> dict[str, int]:
             t0 = time.perf_counter()
             known = ctx.db.known_files(root)
             files = scan_root(s.media_root, root, kinds=["video"], known=known,
+                              exclude=[s.quarantine_root()],
                               progress=lambda r, n: log.info(
                                   "discover progress", extra={"root": r, "files": n}))
             changed = [f for f in files

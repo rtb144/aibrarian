@@ -103,7 +103,8 @@ apply in name order, each once, and are recorded in `aib.schema_migrations`.
 
 `aibrarian duplicates [--exact-only] [--tsv]`, `GET /duplicates` (`?cached=true` for the
 last saved report, `?exact_only=true`), page `/duplicates/ui`, Prefect deployment
-`duplicates` (Sundays 04:00). Nothing is ever deleted or moved.
+`duplicates` (Sundays 04:00). The report itself never deletes or moves anything (see
+"Quarantining identical duplicates" below for the opt-in move).
 
 - **identical**: same size → same head+tail sample → same full sha256. The catalog
   fingerprint mixes in mtime so it can't be used; content hashes are cached in
@@ -113,3 +114,40 @@ last saved report, `?exact_only=true`), page `/duplicates/ui`, Prefect deploymen
 - `suggested_keep` prefers `Title (Year)/Title (Year).ext`, then resolution, bitrate,
   stream counts, sidecars. `sidecars_only_on_others` lists subtitles etc. that exist only
   next to a non-kept copy, with the name they would get next to the kept file.
+
+## Quarantining identical duplicates
+
+Only **identical** (byte-for-byte) groups. Nothing is ever deleted: extra copies are
+*moved* (instant `rename`, same filesystem) into a quarantine folder and can be restored.
+
+```bash
+dc exec aibrarian-api aibrarian duplicates quarantine --limit 3          # dry run (plan)
+dc exec aibrarian-api aibrarian duplicates quarantine --group 4 --group 7 # only these groups
+dc exec aibrarian-api aibrarian duplicates quarantine --limit 3 --execute # move them
+dc exec aibrarian-api aibrarian duplicates restore --manifest /media/_quarantine/2026-10-12/manifest.jsonl            # dry run
+dc exec aibrarian-api aibrarian duplicates restore --manifest /media/_quarantine/2026-10-12/manifest.jsonl --execute
+```
+
+- Group numbers are the `group` column of `aibrarian duplicates --exact-only --tsv` / the
+  `#N` on `/duplicates/ui` (identical section). The plan is recomputed from a fresh
+  exact-only report each run (hash cache makes this fast), so check it before `--execute`.
+- The plan lists group, keeper, extra copy, size, destination and a GB total.
+  `--json` prints the full plan/result.
+- Per copy, at execute time: keeper and copy must exist, sizes must match and a **fresh**
+  full sha256 of both must match (cached hashes are not trusted), else it's skipped.
+  Sidecars (`.srt/.ass/.sub/.vtt/.nfo/.transcript.json`) that exist only next to the
+  copy are **copied** next to the keeper under the keeper's name (never overwriting);
+  the copy's own sidecars travel with it into quarantine.
+- Destination: `$QUARANTINE_DIR/<YYYY-MM-DD>/<path relative to /media>`. Default
+  `QUARANTINE_DIR=/media/_quarantine` (container path, `AIB_QUARANTINE_DIR` also works).
+  It must be on the media filesystem; a cross-device move is refused.
+- Each batch folder holds `manifest.jsonl` (used by `restore`) and `manifest.tsv`;
+  restores are logged in `restored.jsonl` so a restore is idempotent and never overwrites.
+- Catalog: the moved row is repointed to the quarantine path, `missing=TRUE`,
+  `stage='skipped'`, with a `quarantine` event in `aib.media_event` (`aibrarian timeline <id>`).
+  Restore puts back the original path and previous stage and logs a `restore` event.
+- `discover`, `library-scan` and `srt-catalog` skip any `_quarantine` directory and
+  `QUARANTINE_DIR`.
+- `/duplicates/ui` shows a read-only quarantine preview (`GET /duplicates/quarantine-plan`);
+  there is no button that moves files.
+- Once you're happy (e.g. Jellyfin plays the keepers), delete the dated folder by hand.

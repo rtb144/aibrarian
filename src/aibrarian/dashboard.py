@@ -137,7 +137,7 @@ tr.keep{background:#eaffea}.grp{margin-top:1rem;font-weight:600}.warn{color:#a60
 <h1>Duplicates (read-only)</h1>
 <p><a href="../dashboard">dashboard</a> · Nothing is deleted or moved. "keep" is a suggestion only.
 <button onclick="load(false)">Re-scan now</button> <label><input type="checkbox" id="exact"> identical only</label></p>
-<div class="cards" id="sum">loading...</div><div id="out"></div>
+<div class="cards" id="sum">loading...</div><div id="qp"></div><div id="out"></div>
 <script>
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const gb=b=>(b/1e9).toFixed(2)+" GB";
@@ -161,6 +161,8 @@ async function load(cached){
  document.getElementById("sum").innerHTML=[["identical groups",s.identical_groups],["identical savings",gb(s.identical_reclaimable_bytes)],
   ["review groups",s.review_groups],["review (if all extra copies removed)",gb(s.review_reclaimable_bytes)],["files",s.files_scanned]]
   .map(([k,v])=>`<div class="card"><b>${v}</b>${k}</div>`).join("");
- document.getElementById("out").innerHTML=section("Identical (byte-for-byte)",r.identical)+section("Likely duplicates - review",r.review);}
+ document.getElementById("out").innerHTML=section("Identical (byte-for-byte)",r.identical)+section("Likely duplicates - review",r.review);
+ const q=await (await fetch("../duplicates/quarantine-plan?cached=true")).json();
+ document.getElementById("qp").innerHTML=`<h2>Quarantine preview (dry run, read-only)</h2><p>${q.files} extra copies in ${q.groups} identical groups, ${q.total_gb} GB would move to <code>${esc(q.batch_dir)}</code>. Run <code>aibrarian duplicates quarantine --limit 3</code> on the server to review, then add <code>--execute</code>. This page never moves files.</p>`;}
 load(true);
 </script></body></html>"""

@@ -226,6 +226,35 @@ class Database:
                  json.dumps(details or {}), flow_run_id, task_run_id))
             c.commit()
 
+    def quarantine_media(self, media_id: int, old_path: str, new_path: str, started_at: Any,
+                         details: dict[str, Any]) -> None:
+        """Repoint a quarantined copy, mark it missing + skipped, log a media_event."""
+        with self.conn() as c:
+            row = c.execute("SELECT stage FROM aib.media_file WHERE id=%s", (media_id,)).fetchone()
+            prev = row["stage"] if row else None
+            c.execute("UPDATE aib.media_file SET path=%s, missing=TRUE, stage='skipped', "
+                      "last_error=%s, locked_by=NULL, stage_changed_at=now() WHERE id=%s",
+                      (new_path, f"quarantined duplicate of {details.get('keeper')}", media_id))
+            c.execute("""INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,
+                           outcome, started_at, details) VALUES (%s,'quarantine',%s,'skipped',
+                           'ok',%s,%s)""",
+                      (media_id, prev, started_at,
+                       json.dumps(details | {"from": old_path, "to": new_path})))
+            c.commit()
+
+    def restore_media(self, media_id: int, quarantine_path: str, path: str, stage: str,
+                      started_at: Any) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE aib.media_file SET path=%s, missing=FALSE, stage=%s, "
+                      "last_error=NULL, stage_changed_at=now() WHERE id=%s AND path=%s",
+                      (path, stage, media_id, quarantine_path))
+            c.execute("""INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,
+                           outcome, started_at, details) VALUES (%s,'restore','skipped',%s,
+                           'ok',%s,%s)""",
+                      (media_id, stage, started_at,
+                       json.dumps({"from": quarantine_path, "to": path})))
+            c.commit()
+
     def audio_layout_counts(self) -> dict[str, int]:
         with self.conn() as c:
             rows = c.execute("SELECT coalesce(audio_layout, 'unknown') AS l, count(*) AS n "

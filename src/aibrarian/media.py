@@ -73,10 +73,21 @@ def parse_name(name: str) -> dict[str, object]:
     return out
 
 
-def iter_files(root: Path, kinds: Iterable[MediaKind] | None = None) -> Iterator[Path]:
+QUARANTINE_DIRNAME = "_quarantine"
+
+
+def iter_files(root: Path, kinds: Iterable[MediaKind] | None = None,
+               exclude: Iterable[Path] = ()) -> Iterator[Path]:
+    """Walk ``root``; hidden dirs, ``_quarantine`` dirs and ``exclude`` are skipped."""
     wanted = set(kinds) if kinds else None
+    skip = {os.path.abspath(e) for e in exclude}
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        if os.path.abspath(dirpath) in skip:
+            dirnames[:] = []
+            continue
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".")
+                             and d != QUARANTINE_DIRNAME
+                             and os.path.abspath(os.path.join(dirpath, d)) not in skip)
         for fn in sorted(filenames):
             if fn.startswith("."):
                 continue
@@ -88,7 +99,8 @@ def iter_files(root: Path, kinds: Iterable[MediaKind] | None = None) -> Iterator
 def scan_root(media_root: Path, root_name: str,
               kinds: Iterable[MediaKind] | None = None,
               known: dict[str, tuple[int, float, str]] | None = None,
-              progress=None, progress_every: int = 500) -> list[MediaFile]:
+              progress=None, progress_every: int = 500,
+              exclude: Iterable[Path] = ()) -> list[MediaFile]:
     """Walk one root. ``known`` maps path -> (size, mtime, fingerprint) from the
     catalog; files whose size and mtime are unchanged reuse the stored
     fingerprint instead of reading 2 MiB from disk, so a re-scan of an
@@ -98,7 +110,7 @@ def scan_root(media_root: Path, root_name: str,
         return []
     known = known or {}
     results: list[MediaFile] = []
-    for n, p in enumerate(iter_files(root, kinds), 1):
+    for n, p in enumerate(iter_files(root, kinds, exclude), 1):
         try:
             st = p.stat()
             prev = known.get(str(p))

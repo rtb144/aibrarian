@@ -34,7 +34,7 @@ def library_scan(ctx: Context, max_items: int | None = None, resume: bool = True
         base = s.media_root / root
         if not base.is_dir():
             continue
-        for p in iter_files(base, ["video", "audio"]):
+        for p in iter_files(base, ["video", "audio"], [s.quarantine_root()]):
             if max_items and counts["processed"] >= max_items:
                 break
             if str(p) in done:
@@ -237,6 +237,30 @@ def pipeline_status(ctx: Context) -> dict[str, Any]:
     return {"stages": counts, "backlog": backlog,
             "audio_layouts": ctx.db.audio_layout_counts(),
             "eta": estimate(ctx.db.completion_times("transcribe"), backlog)}
+
+
+def quarantine_plan(ctx: Context, groups: list[int] | None = None, limit: int | None = None,
+                    cached: bool = False) -> dict[str, Any]:
+    """Dry-run plan for identical groups (read-only)."""
+    import json
+
+    from . import duplicates, quarantine
+
+    f = ctx.settings.report_dir / "duplicates.json"
+    if cached and f.exists():
+        rep = json.loads(f.read_text())
+    else:  # fresh exact-only report; does not overwrite the cached full report
+        rep = duplicates.report(ctx.db.duplicate_candidates(), duplicates.HashCache(ctx.db),
+                                exact_only=True)
+    return quarantine.plan(rep, ctx.settings, groups, limit)
+
+
+def quarantine_execute(ctx: Context, groups: list[int] | None = None,
+                       limit: int | None = None) -> dict[str, Any]:
+    from . import quarantine
+
+    p = quarantine_plan(ctx, groups, limit)  # always a fresh report before moving
+    return quarantine.execute(p, ctx.db)
 
 
 def duplicates_report(ctx: Context, exact_only: bool = False,

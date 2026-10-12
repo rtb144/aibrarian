@@ -134,3 +134,78 @@ def test_api_and_ui(ctx, settings, tmp_path):
     assert c.get("/duplicates", params={"cached": True}).json()["summary"] == r["summary"]
     assert c.get("/duplicates", params={"exact_only": True}).json()["review"] == []
     assert "Duplicates (read-only)" in c.get("/duplicates/ui").text
+    qp = c.get("/duplicates/quarantine-plan", params={"limit": 1}).json()
+    assert qp["dry_run"] and qp["files"] == 1
+    assert all(Path(r["path"]).exists() for r in rows)               # preview moves nothing
+
+
+# -- quarantine -------------------------------------------------------------
+
+class QDB:
+    def __init__(self):
+        self.events = []
+
+    def quarantine_media(self, mid, old, new, started, details):
+        self.events.append(("quarantine", mid, old, new))
+
+    def restore_media(self, mid, qpath, path, stage, started):
+        self.events.append(("restore", mid, qpath, path, stage))
+
+
+def test_quarantine_dry_run_execute_restore(tmp_path):
+    from datetime import date
+
+    from aibrarian import quarantine as q
+    from aibrarian.config import Settings
+
+    media = tmp_path / "media"
+    rows = library(media)
+    s = Settings(_env_file=None, media_root=media)
+    rep = d.report(rows, d.HashCache(), exact_only=True)
+    p = q.plan(rep, s, limit=3, day=date(2026, 10, 12))
+    assert p["files"] == 1 and p["dry_run"]
+    it = p["items"][0]
+    extra = Path(it["path"])
+    assert extra.name == "5lbs.Of.Pressure.2024.mkv"
+    assert it["quarantine_path"] == str(media / "_quarantine/2026-10-12" / extra.relative_to(media))
+    assert "DRY RUN" in q.format_plan(p) and extra.exists()          # dry run moves nothing
+    assert q.plan(rep, s, groups=[2])["files"] == 0
+
+    db = QDB()
+    res = q.execute(p, db)
+    keeper = Path(it["keeper"])
+    assert res["moved"] == 1 and not extra.exists() and keeper.exists()
+    assert Path(it["quarantine_path"]).exists()
+    assert (keeper.parent / "5lbs Of Pressure (2024).eng.srt").exists()  # sidecar copied to keeper
+    manifest = Path(res["manifest"])
+    assert manifest.exists() and (manifest.parent / "manifest.tsv").exists()
+    assert db.events[0][0] == "quarantine"
+    # quarantine dir is invisible to discover/library scans
+    from aibrarian.media import iter_files
+    assert not any(x.is_relative_to(s.quarantine_root()) for x in iter_files(media))
+    custom = media / "01-movies" / "q"
+    (custom / "a").mkdir(parents=True)
+    (custom / "a" / "x.mkv").write_bytes(b"1")
+    assert not any(x.is_relative_to(custom) for x in iter_files(media, exclude=[custom]))
+
+    assert q.restore(manifest)["items"][0]["result"] == "would restore"
+    r = q.restore(manifest, execute=True, db=db)
+    assert r["restored"] == 1 and extra.exists() and not Path(it["quarantine_path"]).exists()
+    assert db.events[-1][0] == "restore"
+    assert q.restore(manifest, execute=True)["restored"] == 0      # idempotent
+
+
+def test_quarantine_skips_when_bytes_differ(tmp_path):
+    from aibrarian import quarantine as q
+    from aibrarian.config import Settings
+
+    media = tmp_path / "media"
+    rows = library(media)
+    s = Settings(_env_file=None, media_root=media)
+    p = q.plan(d.report(rows, d.HashCache(), exact_only=True), s)
+    extra = Path(p["items"][0]["path"])
+    data = bytearray(extra.read_bytes())
+    data[100] ^= 0xFF                                               # changed after the report
+    extra.write_bytes(bytes(data))
+    res = q.execute(p)
+    assert res["moved"] == 0 and res["results"][0]["reason"] == "sha256 differs" and extra.exists()

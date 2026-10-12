@@ -124,6 +124,7 @@ def find_sidecar_video(srt: Path) -> Path | None:
 
 def catalog_srt_files(media_root: Path) -> Iterator[dict[str, Any]]:
     for dirpath, dirnames, filenames in os.walk(media_root):
+        dirnames[:] = [d for d in dirnames if d != "_quarantine"]
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for fn in filenames:
             if not fn.lower().endswith(".srt"):
