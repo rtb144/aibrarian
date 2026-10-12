@@ -65,6 +65,10 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.15.4
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     restart: unless-stopped
     ports: ["6333:6333", "6334:6334"]
     volumes: [qdrant_data:/qdrant/storage]
