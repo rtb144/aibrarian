@@ -86,17 +86,30 @@ def iter_files(root: Path, kinds: Iterable[MediaKind] | None = None) -> Iterator
 
 
 def scan_root(media_root: Path, root_name: str,
-              kinds: Iterable[MediaKind] | None = None) -> list[MediaFile]:
+              kinds: Iterable[MediaKind] | None = None,
+              known: dict[str, tuple[int, float, str]] | None = None,
+              progress=None, progress_every: int = 500) -> list[MediaFile]:
+    """Walk one root. ``known`` maps path -> (size, mtime, fingerprint) from the
+    catalog; files whose size and mtime are unchanged reuse the stored
+    fingerprint instead of reading 2 MiB from disk, so a re-scan of an
+    already-catalogued library is just a directory walk + stat()."""
     root = media_root / root_name
     if not root.is_dir():
         return []
+    known = known or {}
     results: list[MediaFile] = []
-    for p in iter_files(root, kinds):
+    for n, p in enumerate(iter_files(root, kinds), 1):
         try:
             st = p.stat()
-            fp = fingerprint(p, st.st_size, st.st_mtime)
+            prev = known.get(str(p))
+            if prev is not None and prev[0] == st.st_size and abs(prev[1] - st.st_mtime) < 1e-3:
+                fp = prev[2]
+            else:
+                fp = fingerprint(p, st.st_size, st.st_mtime)
         except OSError:
             continue
+        if progress is not None and n % progress_every == 0:
+            progress(root_name, n)
         # TV shows: prefer the show directory name as title
         rel = p.relative_to(root)
         meta = parse_name(p.name)

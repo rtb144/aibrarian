@@ -142,17 +142,41 @@ def run_action(ctx: Context, name: str, media: dict[str, Any] | int,
 
 
 # --------------------------------------------------------------------------
+DISCOVER_LOCK = 724412
+
+
 def discover(ctx: Context, roots: list[str] | None = None) -> dict[str, int]:
-    """Walk roots, register new/changed videos as ``discovered``. Not per-item."""
+    """Walk roots, register new/changed videos as ``discovered``. Not per-item.
+
+    Fast on re-scans: unchanged files (same size + mtime as in the catalog) are
+    neither hashed nor written; only new/changed rows are upserted, in short
+    batches. A Postgres advisory lock makes concurrent discovers a no-op
+    instead of fighting over row locks.
+    """
     s = ctx.settings
-    stats = {"seen": 0, "new": 0, "reset": 0, "missing": 0}
-    for root in roots or s.transcribe_roots:
-        files = scan_root(s.media_root, root, kinds=["video"])
-        res = ctx.db.upsert_media(files)
-        stats["seen"] += len(res)
-        stats["new"] += sum(r["created"] for r in res)
-        stats["reset"] += sum(r["reset"] for r in res)
-        stats["missing"] += ctx.db.mark_missing(root, [str(f.path) for f in files])
+    stats = {"seen": 0, "unchanged": 0, "new": 0, "reset": 0, "missing": 0, "locked": 0}
+    with ctx.db.try_lock(DISCOVER_LOCK) as got:
+        if not got:
+            log.info("discover already running elsewhere; skipping")
+            stats["locked"] = 1
+            return stats
+        for root in roots or s.transcribe_roots:
+            t0 = time.perf_counter()
+            known = ctx.db.known_files(root)
+            files = scan_root(s.media_root, root, kinds=["video"], known=known,
+                              progress=lambda r, n: log.info(
+                                  "discover progress", extra={"root": r, "files": n}))
+            changed = [f for f in files
+                       if (k := known.get(str(f.path))) is None or k[2] != f.fingerprint]
+            res = ctx.db.upsert_media(changed)
+            stats["seen"] += len(files)
+            stats["unchanged"] += len(files) - len(changed)
+            stats["new"] += sum(r["created"] for r in res)
+            stats["reset"] += sum(r["reset"] for r in res)
+            stats["missing"] += ctx.db.mark_missing(root, [str(f.path) for f in files])
+            log.info("discover root done", extra={
+                "root": root, "files": len(files), "changed": len(changed),
+                "seconds": round(time.perf_counter() - t0, 2)})
     log.info("discover done", extra=stats)
     return stats
 

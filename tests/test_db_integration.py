@@ -116,3 +116,14 @@ def test_openlibrary_import_and_lookup(db, tmp_path):
     assert lookup(db, isbn="978-0441013593")[0]["confidence"] == 1.0
     hits = lookup(db, title="dune", author="Herbert")
     assert hits[0]["key"] == "/books/OL0M"
+
+
+def test_known_files_and_try_lock(db):
+    db.upsert_media([mf("/m/01-movies/k.mkv", fp="zz")])
+    assert db.known_files("01-movies") == {"/m/01-movies/k.mkv": (1, 1.0, "zz")}
+    with db.try_lock(99) as a:
+        assert a
+        with db.try_lock(99) as b:
+            assert not b
+    with db.try_lock(99) as c:
+        assert c

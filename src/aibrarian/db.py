@@ -67,7 +67,7 @@ class Database:
         return applied
 
     # -- media + state machine -------------------------------------------
-    def upsert_media(self, files: Sequence[MediaFile]) -> list[dict[str, Any]]:
+    def upsert_media(self, files: Sequence[MediaFile], batch: int = 500) -> list[dict[str, Any]]:
         """Insert/refresh files. New files and files whose fingerprint changed are
         (re)set to ``discovered`` and get a history event. Returns
         ``[{id, path, created, reset}]``."""
@@ -91,7 +91,7 @@ class Database:
                     AS old_fp, fingerprint
         """
         with self.conn() as c:
-            for f in files:
+            for i, f in enumerate(files, 1):
                 row = c.execute(sql, (str(f.path), f.root, f.kind, f.size_bytes, f.mtime,
                                       f.fingerprint, f.title, f.year, f.season,
                                       f.episode)).fetchone()
@@ -104,8 +104,28 @@ class Database:
                         (row["id"], "discover", "ok" if created else "reset"))
                 out.append({"id": row["id"], "path": row["path"],
                             "created": created, "reset": reset})
+                if i % batch == 0:  # short transactions: never hold thousands of row locks
+                    c.commit()
             c.commit()
         return out
+
+    def known_files(self, root: str) -> dict[str, tuple[int, float, str]]:
+        """path -> (size, mtime, fingerprint) for one root (one query)."""
+        with self.conn() as c:
+            rows = c.execute("SELECT path, size_bytes, mtime, fingerprint FROM aib.media_file "
+                             "WHERE root=%s", (root,)).fetchall()
+        return {r["path"]: (r["size_bytes"], r["mtime"], r["fingerprint"]) for r in rows}
+
+    @contextmanager
+    def try_lock(self, key: int) -> Iterator[bool]:
+        """Session-level advisory lock; yields False if someone else holds it."""
+        with psycopg.connect(self.dsn, autocommit=True) as c:
+            got = c.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()[0]
+            try:
+                yield bool(got)
+            finally:
+                if got:
+                    c.execute("SELECT pg_advisory_unlock(%s)", (key,))
 
     def mark_missing(self, root: str, present_paths: Sequence[str]) -> int:
         with self.conn() as c:

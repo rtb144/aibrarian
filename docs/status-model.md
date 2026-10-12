@@ -79,6 +79,8 @@ The table is append-only. Rows are deleted only when their media row is deleted.
 
 - **Claiming**: `db.claim(stage, roots, limit, worker)` uses `FOR UPDATE SKIP LOCKED` plus a lease, so two flows never take the same item.
 - **GPU**: Prefect tag concurrency limits allow `gpu-whisper=1` (one whisper job on GPU0) and `gpu-ollama=2`. Create them once with `aibrarian prefect-limits`.
+- **No overlap**: every scheduled deployment has a concurrency limit of 1 with collision strategy `CANCEL_NEW`, so a run that would overlap a still-running one is cancelled instead of piling up.
+- **Discovery is separate**: the `discover` deployment (every `AIB_DISCOVER_INTERVAL_S`, default 1800 s) walks the roots. Unchanged files (same size + mtime) are not re-hashed or re-written; only new or changed rows are upserted, in batches of 500. An advisory lock makes a second concurrent discover a no-op. `media-pipeline` only runs the stages (`run_discover=false` by default), so it never waits for a full walk.
 - **Batching**: `media-pipeline` runs every `AIB_TRANSCRIBE_INTERVAL_S` (300 s). Per run it handles up to `5×10` probes, `5×2` extractions, `5` transcriptions and `5×4` embeds and catalogs. Leftovers wait for the next run.
 
 ## Observability surface

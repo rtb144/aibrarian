@@ -124,6 +124,40 @@ def test_discover_uses_db(ctx):
     assert out["new"] == 1 and calls["files"][0].root == "05-instructional_videos"
 
 
+def test_discover_rescan_skips_unchanged_without_hashing(ctx, monkeypatch):
+    import aibrarian.media as media
+
+    d = ctx.settings.media_root / "01-movies"
+    d.mkdir(parents=True)
+    a, b = d / "a.mkv", d / "b.mkv"
+    a.write_bytes(b"1")
+    b.write_bytes(b"2")
+    st = a.stat()
+    known = {str(a): (st.st_size, st.st_mtime, "fp-a")}
+    ctx.db.known_files = lambda root: known if root == "01-movies" else {}
+    hashed = []
+    real = media.fingerprint
+    monkeypatch.setattr(media, "fingerprint", lambda p, *x: hashed.append(p.name) or real(p, *x))
+    upserted = []
+    ctx.db.upsert_media = lambda files: upserted.extend(files) or [
+        {"id": 1, "path": str(f.path), "created": True, "reset": False} for f in files]
+    ctx.db.mark_missing = lambda root, paths: 0
+    out = discover(ctx)
+    assert hashed == ["b.mkv"]                       # a.mkv not re-read
+    assert [f.path.name for f in upserted] == ["b.mkv"]  # only new/changed written
+    assert out["unchanged"] == 1 and out["new"] == 1 and out["seen"] == 2
+
+
+def test_discover_skips_when_locked(ctx):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def busy(key):
+        yield False
+    ctx.db.try_lock = busy
+    assert discover(ctx)["locked"] == 1
+
+
 class ApiDB:
     def __init__(self):
         self.row = {"id": 1, "path": "/media/01-movies/A/A.mkv", "title": "A", "stage": "failed"}

@@ -31,6 +31,7 @@ All commands run from the repo checkout on z8g4 (e.g. `/opt/stacks/aibrarian`).
 | retry one item | `curl -X POST z8g4:8790/media/<id>/retry` |
 | run one step by hand | `curl -X POST z8g4:8790/media/<id>/actions/probe` |
 | kick the pipeline now | Prefect UI → `media-pipeline` → Run, or `dc exec aibrarian-gpu aibrarian pipeline` |
+| rescan the disks now | Prefect UI → `discover` → Run, or `dc exec aibrarian-worker aibrarian discover` |
 | pause transcription | Prefect UI → Deployments → `media-pipeline` → pause schedule |
 | reprocess one file | `touch` it (the fingerprint changes and it goes back to `discovered`), or `UPDATE aib.media_file SET stage='audio_extracted' WHERE id=…` to redo from transcribe |
 | review placement suggestions | `GET /suggestions?domain=video` → `POST /suggestions/<id>/apply` (dry run) → `?dry_run=false` |

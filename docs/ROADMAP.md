@@ -105,7 +105,7 @@ you go (edit this file, or copy it into Obsidian).
 
 - [ ] **3.8 Start the workers.**
   Do: `dc up -d aibrarian-worker aibrarian-gpu`
-  Done when: Prefect UI → **Deployments** lists `media-pipeline`, `library-scan`, `book-scan`, `retry-failed`, `openlibrary-import` and `stage`.
+  Done when: Prefect UI → **Deployments** lists `media-pipeline`, `discover`, `library-scan`, `book-scan`, `retry-failed`, `openlibrary-import` and `stage`.
 
 - [ ] **3.9 Set the GPU limits.**
   Do: `dc exec aibrarian-worker aibrarian prefect-limits`

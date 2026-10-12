@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,13 @@ class FakeDB:
         row.setdefault("title", "Movie")
         self.media[mid] = row
         return row
+
+    def known_files(self, root):
+        return {}
+
+    @contextmanager
+    def try_lock(self, key):
+        yield True
 
     def get_media(self, mid: int):
         return dict(self.media[mid]) if mid in self.media else None

@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     transcribe_batch_size: int = Field(5, validation_alias=_env("transcribe_batch_size", "BATCH_SIZE"))
     transcribe_interval_s: int = Field(
         300, validation_alias=_env("transcribe_interval_s", "SCAN_INTERVAL_S"))
+    discover_interval_s: int = 1800  # separate 'discover' deployment
     reuse_legacy_sidecars: bool = True  # reuse old transcriber.py sidecars (no fingerprint)
     write_sidecars: bool = True  # <video>.transcript.json + <video>.srt next to the file
     segment_chunk_seconds: float = 30.0
