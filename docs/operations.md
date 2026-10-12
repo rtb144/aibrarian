@@ -72,3 +72,15 @@ apply in name order, each once, and are recorded in `aib.schema_migrations`.
 | Moves report `skip_dst_exists` | the target already exists; compare the files, then `aibrarian cleanup-skipped` (dry run first) |
 | Sidecar write warnings | the media mount is read-only or owned by someone else; the GPU worker runs as root and chowns to match the video |
 | Logs | `dc logs <svc> \| jq 'select(.level=="error")'` (JSON lines) |
+
+## Quote search by movie title
+
+- UI: `http://<host>:8790/search/ui` (title box autocompletes from transcribed movies only).
+- `GET /search?q=...&title=...` (also `/search/text`, `/search/semantic`): title is
+  fuzzy-resolved (case/punctuation-insensitive, typos, optional `(year)`) against items
+  that have transcript segments. Response stays a JSON list; the match is in headers
+  `X-Resolved-Title` (URL-quoted), `X-Media-Id`, `X-Title-Score`. No match → 404,
+  ambiguous (e.g. two "Alfie" films) → 422; both include `detail.suggestions`.
+- `GET /titles/autocomplete?q=jump&limit=10`, `GET /titles/resolve?title=...`.
+- `POST /clip` with `title` uses the same resolver.
+- CLI: `aibrarian search "quote" --title "22 Jump Street (2014)"`.

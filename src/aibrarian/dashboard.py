@@ -73,3 +73,53 @@ function tick(){loadStatus();loadEvents();}
 tick();loadStage("failed");setInterval(tick,15000);
 </script></body></html>
 """
+
+
+SEARCH_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian search</title><style>
+body{font-family:system-ui,sans-serif;margin:1.5rem;max-width:1000px}
+input,select,button{font-size:1rem;padding:.35rem}#title{width:22rem}#q{width:28rem}
+table{border-collapse:collapse;width:100%;margin-top:1rem}td,th{border-bottom:1px solid #ddd;padding:.3rem;text-align:left}
+.msg{margin-top:.6rem;color:#444}.err{color:#b00}.ok{color:#070}
+</style></head><body>
+<h1>Quote search</h1><p><a href="../dashboard">dashboard</a></p>
+<form id="f">
+<input id="title" list="titles" placeholder="Movie (optional) - type to pick" autocomplete="off">
+<datalist id="titles"></datalist>
+<input id="q" placeholder="Quote" required minlength="2">
+<select id="mode"><option>hybrid</option><option>keyword</option><option>semantic</option></select>
+<button>Search</button></form>
+<div id="msg" class="msg"></div>
+<table id="res"></table>
+<script>
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const ts=s=>{s=Math.max(0,s|0);return [s/3600|0,(s%3600)/60|0,s%60].map(n=>String(n).padStart(2,"0")).join(":")};
+let picks={},timer;
+const T=document.getElementById("title"),M=document.getElementById("msg");
+T.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(async()=>{
+ const r=await fetch("../titles/autocomplete?limit=15&q="+encodeURIComponent(T.value));
+ const rows=await r.json();picks={};
+ document.getElementById("titles").innerHTML=rows.map(x=>{const l=x.label||(x.year?`${x.title} (${x.year})`:x.title);
+  picks[l]=x.media_id;return `<option value="${esc(l)}">`}).join("");},150)});
+function err(d){const s=(d.detail&&d.detail.suggestions)||[];
+ M.className="msg err";M.innerHTML=esc((d.detail&&d.detail.error)||JSON.stringify(d.detail))+
+ (s.length?"<br>Did you mean: "+s.map(x=>`<a href="#" data-t="${esc(x.year?x.title+" ("+x.year+")":x.title)}">${esc(x.title)}${x.year?" ("+x.year+")":""}</a>`).join(", "):"");
+ M.querySelectorAll("a[data-t]").forEach(a=>a.onclick=e=>{e.preventDefault();T.value=a.dataset.t;document.getElementById("f").requestSubmit()});}
+document.getElementById("f").onsubmit=async e=>{e.preventDefault();
+ const q=document.getElementById("q").value,p=new URLSearchParams({q,mode:document.getElementById("mode").value,limit:"20"});
+ const t=T.value.trim();if(picks[t])p.set("movie_id",picks[t]);else if(t)p.set("title",t);
+ M.className="msg";M.textContent="searching...";
+ const r=await fetch("../search?"+p);const d=await r.json();
+ if(!r.ok){err(d);document.getElementById("res").innerHTML="";return}
+ const rt=r.headers.get("X-Resolved-Title");
+ M.textContent=(rt?"Movie: "+decodeURIComponent(rt)+" - ":"")+d.length+" hits";
+ document.getElementById("res").innerHTML="<tr><th>movie</th><th>time</th><th>text</th><th>score</th><th></th></tr>"+
+  d.map((h,i)=>`<tr><td>${esc(h.title)}</td><td>${ts(h.start)}-${ts(h.end)}</td><td>${esc(h.text)}</td>`+
+  `<td>${(+h.score).toFixed(3)}</td><td><button data-i="${i}">Make clip</button></td></tr>`).join("");
+ document.querySelectorAll("#res button").forEach(b=>b.onclick=async()=>{const h=d[b.dataset.i];
+  b.disabled=true;b.textContent="cutting...";
+  const r=await fetch("../clip",{method:"POST",headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({phrase:h.text,movie_id:h.media_id})});const c=await r.json();
+  if(r.ok){b.textContent="done";M.className="msg ok";M.textContent=`Clip ${ts(c.start)}-${ts(c.end)}: ${c.output}`}
+  else{b.disabled=false;b.textContent="Make clip";err(c)}});};
+</script></body></html>"""

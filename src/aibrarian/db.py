@@ -151,6 +151,15 @@ class Database:
                 (title, title, f"%{title}%", limit),
             ).fetchall()
 
+    def searchable_titles(self) -> list[dict[str, Any]]:
+        """Media that have transcript segments (what search/clip can actually hit)."""
+        with self.conn() as c:
+            return c.execute(
+                "SELECT m.id AS media_id, coalesce(m.title, "
+                "regexp_replace(m.path, '^.*/|\\.[^.]*$', '', 'g')) AS title, m.year "
+                "FROM aib.media_file m WHERE NOT m.missing AND EXISTS "
+                "(SELECT 1 FROM aib.segment s WHERE s.media_id = m.id) ORDER BY 2").fetchall()
+
     def get_media_by_path(self, path: str) -> dict[str, Any] | None:
         with self.conn() as c:
             return c.execute("SELECT * FROM aib.media_file WHERE path=%s", (path,)).fetchone()

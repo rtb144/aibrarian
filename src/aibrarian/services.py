@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from . import books, clips, fileops
+from . import books, clips, fileops, titles
 from .actions import Context
 from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .eta import estimate
@@ -121,6 +121,31 @@ def search_windows(ctx: Context, q: str, limit: int = 10) -> list[dict[str, Any]
     return merge_hits(hits)[:limit]
 
 
+def resolve_title(ctx: Context, title: str) -> dict[str, Any]:
+    """Fuzzy-resolve ``title`` to one searchable media item or raise TitleNotResolved."""
+    res = titles.resolve(title, ctx.db.searchable_titles())
+    if res.match is None:
+        raise titles.TitleNotResolved(title, res)
+    return res.match | {"resolved_title": titles.label(res.match)}
+
+
+def autocomplete_titles(ctx: Context, q: str, limit: int = 10) -> list[dict[str, Any]]:
+    avail = ctx.db.searchable_titles()
+    if not q.strip():
+        return [{**t, "score": None} for t in avail[:limit]]
+    return [r | {"label": titles.label(r)} for r in titles.rank(q, avail, limit)]
+
+
+def search_titled(ctx: Context, q: str, limit: int = 10, mode: str = "hybrid",
+                  media_id: int | None = None, title: str | None = None
+                  ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    resolved = None
+    if title and media_id is None:
+        resolved = resolve_title(ctx, title)
+        media_id = resolved["media_id"]
+    return search(ctx, q, limit, mode, media_id), resolved
+
+
 def resolve_media(ctx: Context, media_id: int | None, title: str | None,
                   rel_path: str | None) -> dict[str, Any]:
     if media_id is not None:
@@ -128,8 +153,7 @@ def resolve_media(ctx: Context, media_id: int | None, title: str | None,
     elif rel_path:
         m = ctx.db.get_media_by_path(str(ctx.settings.media_root / rel_path))
     elif title:
-        found = ctx.db.find_media_by_title(title, 1)
-        m = found[0] if found else None
+        m = ctx.db.get_media(resolve_title(ctx, title)["media_id"])
     else:
         m = None
     if m is None:

@@ -142,3 +142,11 @@ def test_media_info_columns_and_reprobe_queries(db):
     assert db.get_media(mid)["stage"] == "probed"
     assert db.audio_layout_counts() == {"5.1": 1}
     assert db.list_media(audio_layout="5.1")[0]["audio_language"] == "en"
+
+
+def test_searchable_titles_only_with_segments(db):
+    rows = db.upsert_media([mf("/m/01-movies/s1.mkv"), mf("/m/01-movies/s2.mkv")])
+    db.save_segments(rows[0]["id"], [Segment(seq=0, start=0, end=1, text="hi")],
+                     "fp", "en", "large-v3", 1.0)
+    got = db.searchable_titles()
+    assert [r["media_id"] for r in got] == [rows[0]["id"]] and got[0]["title"]

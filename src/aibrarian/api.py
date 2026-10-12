@@ -21,9 +21,10 @@ from pydantic import BaseModel
 from . import __version__, services
 from .actions import Context, RetryableError, run_action
 from .config import get_settings
-from .dashboard import DASHBOARD_HTML
+from .dashboard import DASHBOARD_HTML, SEARCH_UI_HTML
 from .metrics import SUGGESTIONS_OPEN, refresh_stage_gauges
 from .status import ACTIONS, Stage
+from .titles import TitleNotResolved
 
 log = logging.getLogger("aibrarian.api")
 
@@ -195,25 +196,62 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
                 for s in c().db.segments_for_media(media_id)]
 
     # -- search ------------------------------------------------------------
+    def _unresolved(exc: TitleNotResolved) -> HTTPException:
+        code = 404 if exc.reason == "not_found" else 422
+        return HTTPException(code, {"error": str(exc), "reason": exc.reason,
+                                    "title": exc.query, "suggestions": exc.suggestions})
+
     @app.get("/search")
-    def search(q: str = Query(..., min_length=2), mode: str = "hybrid",
-               movie_id: int | None = None, limit: int = Query(10, ge=1, le=100)):
+    def search(response: Response, q: str = Query(..., min_length=2), mode: str = "hybrid",
+               movie_id: int | None = None, limit: int = Query(10, ge=1, le=100),
+               title: str | None = None):
+        """List of hits (unchanged shape). With ``title`` the film is fuzzy-resolved
+        and reported in ``X-Resolved-Title`` / ``X-Media-Id`` headers; 404 (no match)
+        or 422 (ambiguous) carry ``suggestions``."""
         if mode not in ("hybrid", "semantic", "keyword"):
             raise HTTPException(422, "mode must be hybrid|semantic|keyword")
         try:
-            return services.search(c(), q, limit, mode, movie_id)
+            hits, resolved = services.search_titled(c(), q, limit, mode, movie_id, title)
+        except TitleNotResolved as exc:
+            raise _unresolved(exc) from exc
         except Exception as exc:
             raise HTTPException(503, f"search backend unavailable: {exc}") from exc
+        if resolved:
+            # headers must be latin-1; quote non-ASCII
+            from urllib.parse import quote
+
+            response.headers["X-Resolved-Title"] = quote(resolved["resolved_title"], safe=" ()'.,:-&!?")
+            response.headers["X-Media-Id"] = str(resolved["media_id"])
+            response.headers["X-Title-Score"] = str(resolved["score"])
+        return hits
 
     @app.get("/search/text")
-    def search_text(q: str = Query(..., min_length=2), movie_id: int | None = None,
-                    limit: int = Query(10, ge=1, le=100)):
-        return search(q, "keyword", movie_id, limit)
+    def search_text(response: Response, q: str = Query(..., min_length=2),
+                    movie_id: int | None = None, limit: int = Query(10, ge=1, le=100),
+                    title: str | None = None):
+        return search(response, q, "keyword", movie_id, limit, title)
 
     @app.get("/search/semantic")
-    def search_semantic(q: str = Query(..., min_length=2), movie_id: int | None = None,
-                        limit: int = Query(10, ge=1, le=100)):
-        return search(q, "semantic", movie_id, limit)
+    def search_semantic(response: Response, q: str = Query(..., min_length=2),
+                        movie_id: int | None = None, limit: int = Query(10, ge=1, le=100),
+                        title: str | None = None):
+        return search(response, q, "semantic", movie_id, limit, title)
+
+    @app.get("/titles/resolve")
+    def resolve_title(title: str = Query(..., min_length=1)):
+        try:
+            return services.resolve_title(c(), title)
+        except TitleNotResolved as exc:
+            raise _unresolved(exc) from exc
+
+    @app.get("/titles/autocomplete")
+    def autocomplete(q: str = "", limit: int = Query(10, ge=1, le=50)):
+        """Only searchable (transcribed) titles; prefix + fuzzy."""
+        return services.autocomplete_titles(c(), q, limit)
+
+    @app.get("/search/ui", response_class=HTMLResponse)
+    def search_ui() -> str:
+        return SEARCH_UI_HTML
 
     @app.get("/search/windows")
     def search_windows(q: str = Query(..., min_length=2), limit: int = Query(10, le=50)):
@@ -225,6 +263,8 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
         try:
             return services.make_clip(c(), req.phrase, req.movie_id, req.title, req.rel_path,
                                       req.match_index, req.padding)
+        except TitleNotResolved as exc:
+            raise _unresolved(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 

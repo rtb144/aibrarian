@@ -100,6 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     se.add_argument("--mode", default="hybrid", choices=["hybrid", "semantic", "keyword"])
     se.add_argument("--windows", action="store_true", help="search movie_windows")
     se.add_argument("--limit", type=int, default=10)
+    se.add_argument("--title", help="restrict to one movie (fuzzy, e.g. '22 Jump Street (2014)')")
+    se.add_argument("--id", type=int, help="restrict to media id")
 
     cl = sub.add_parser("clip", help="(was movie_clipper.py)")
     cl.add_argument("phrase")
@@ -247,8 +249,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         recs = [r for lp in (args.log or [None]) for r in _records(lp, ctx)]
         _print(fileops.subtitle_report(s.media_root, recs))
     elif cmd == "search":
-        _print(services.search_windows(ctx, args.query, args.limit) if args.windows
-               else services.search(ctx, args.query, args.limit, args.mode))
+        from .titles import TitleNotResolved
+
+        if args.windows:
+            _print(services.search_windows(ctx, args.query, args.limit))
+        else:
+            try:
+                hits, res = services.search_titled(ctx, args.query, args.limit, args.mode,
+                                                   args.id, args.title)
+            except TitleNotResolved as exc:
+                _print({"error": str(exc), "suggestions": exc.suggestions})
+                return 1
+            _print({"resolved": res, "hits": hits} if res else hits)
     elif cmd == "clip":
         _print(services.make_clip(ctx, args.phrase, args.id, args.title, None,
                                   args.match_index, args.pad))
