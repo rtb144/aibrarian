@@ -15,8 +15,9 @@ ARG CALIBRE_VERSION=9.16.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg tini curl xz-utils \
       libegl1 libopengl0 libglx0 libxcb-cursor0 libxkbcommon0 libfontconfig1 libnss3 \
+ && mkdir -p /opt/calibre \
  && curl -fsSL "https://download.calibre-ebook.com/${CALIBRE_VERSION}/calibre-${CALIBRE_VERSION}-x86_64.txz" \
-      | tar -xJ --no-same-owner -C /opt --one-top-level=calibre \
+      | tar -xJ --no-same-owner -C /opt/calibre \
  && ln -s /opt/calibre/calibredb /opt/calibre/ebook-meta /usr/local/bin/ \
  && QT_QPA_PLATFORM=offscreen calibredb --version && QT_QPA_PLATFORM=offscreen ebook-meta --version \
  && apt-get purge -y xz-utils && apt-get autoremove -y \
