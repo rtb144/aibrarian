@@ -207,7 +207,13 @@ services:
     #   docker compose --profile devtools run --rm codegraph-index
     profiles: [devtools]
     image: ghcr.io/vitali87/code-graph-rag:latest
-    command: ["start", "--repo-path", "/repo", "--update-graph"]
+    # --no-start-stack: memgraph is our compose service; without it `cgr start`
+    # tries to launch its own docker stack and dies with "docker not found on PATH"
+    # (codebase_rag/cli.py _maybe_start_stack). `start --update-graph` exits after
+    # the sync. `cgr index` is NOT an alternative: it only writes protobuf files.
+    # --no-embeddings: no Qdrant for cgr here; --yes: non-interactive.
+    command: ["start", "--repo-path", "/repo", "--update-graph", "--no-start-stack",
+              "--no-embeddings", "--yes"]
     environment: &cgr-env
       MEMGRAPH_HOST: memgraph
       MEMGRAPH_PORT: "7687"

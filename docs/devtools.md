@@ -49,7 +49,7 @@ it to editors and agents as an **MCP server**.
 | | |
 |---|---|
 | Images | `ghcr.io/vitali87/code-graph-rag:latest` (entrypoint `code-graph-rag`, default `mcp-server`); `memgraph/memgraph-mage:3.3` with `--telemetry-enabled=false`; `memgraph/lab:3.13.2` (the versions upstream pins in `codebase_rag/docker-compose.yaml`) |
-| Index | `codegraph-index` runs `start --repo-path /repo --update-graph`, which syncs the graph and exits |
+| Index | `codegraph-index` runs `start --repo-path /repo --update-graph --no-start-stack --no-embeddings --yes`, which syncs into the compose `memgraph` and exits |
 | MCP | `codegraph-mcp` runs `mcp-server --transport http --host 0.0.0.0 --port 8080` → host `127.0.0.1:8085` |
 | Graph UI | Memgraph Lab on `127.0.0.1:3002` (quick-connect host `memgraph`) |
 | Ollama | `ORCHESTRATOR_PROVIDER=ollama`, `CYPHER_PROVIDER=ollama`, `*_ENDPOINT=http://ollama:11434/v1`, `*_MODEL=${CGR_MODEL:-qwen3:14b}` (names from upstream `.env.example`) |
@@ -77,3 +77,14 @@ Notes / TODO(verify):
 Devtools ports (3001 DeepWiki UI, 8001 DeepWiki API, 3002 Memgraph Lab, 8085 Code-Graph-RAG MCP) are published on all interfaces for LAN use, e.g. http://192.168.68.52:3001. Memgraph Bolt (7687/7444) stays on 127.0.0.1. There is no auth on these UIs; keep them off the internet.
 
 Code-Graph-RAG MCP refuses to bind to 0.0.0.0 without a token: set `MCP_HTTP_AUTH_TOKEN` in `.env` (e.g. `openssl rand -hex 32`); MCP clients must send it as a bearer token.
+
+### CodeGraph: "docker not found on PATH"
+
+`cgr start` auto-starts its own Docker stack (Memgraph/Qdrant) unless told not to
+(`_maybe_start_stack()` in `codebase_rag/cli.py`, upstream commit 897fb25). The image
+has no docker CLI, so the index job must pass `--no-start-stack` and reach the
+compose `memgraph` via `MEMGRAPH_HOST`/`MEMGRAPH_PORT`. `cgr index` is not a
+substitute: it writes protobuf files (`-o` is required), not Memgraph.
+`--no-embeddings` skips semantic embeddings (no Qdrant for cgr in this stack).
+Compose needs `MCP_HTTP_AUTH_TOKEN` and `POSTGRES_PASSWORD` set in `.env` even for
+the devtools profile, because the whole file is validated.
