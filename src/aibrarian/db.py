@@ -19,6 +19,30 @@ from psycopg.rows import dict_row
 from .config import Settings
 from .models import MediaFile, Segment, Suggestion
 
+
+def _json_default(o):
+    """Make odd metadata values (e.g. pypdf IndirectObject, bytes, sets)
+    JSON-safe instead of crashing a whole scan."""
+    get = getattr(o, "get_object", None)
+    if callable(get):
+        try:
+            r = get()
+            if r is not o:
+                return r
+        except Exception:
+            pass
+    if isinstance(o, bytes):
+        return o.decode("utf-8", "replace")
+    if isinstance(o, (set, frozenset, tuple)):
+        return list(o)
+    return str(o)
+
+
+def _dumps(obj, **kw):
+    kw.setdefault("default", _json_default)
+    return json.dumps(obj, **kw)
+
+
 MIGRATIONS_PKG = "aibrarian.migrations"
 
 
@@ -223,7 +247,7 @@ class Database:
                        started_at, error, details, flow_run_id, task_run_id)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (media_id, action, stage, stage, outcome, started_at, error,
-                 json.dumps(details or {}), flow_run_id, task_run_id))
+                 _dumps(details or {}), flow_run_id, task_run_id))
             c.commit()
 
     def quarantine_media(self, media_id: int, old_path: str, new_path: str, started_at: Any,
@@ -239,7 +263,7 @@ class Database:
                            outcome, started_at, details) VALUES (%s,'quarantine',%s,'skipped',
                            'ok',%s,%s)""",
                       (media_id, prev, started_at,
-                       json.dumps(details | {"from": old_path, "to": new_path})))
+                       _dumps(details | {"from": old_path, "to": new_path})))
             c.commit()
 
     def restore_media(self, media_id: int, quarantine_path: str, path: str, stage: str,
@@ -252,7 +276,7 @@ class Database:
                            outcome, started_at, details) VALUES (%s,'restore','skipped',%s,
                            'ok',%s,%s)""",
                       (media_id, stage, started_at,
-                       json.dumps({"from": quarantine_path, "to": path})))
+                       _dumps({"from": quarantine_path, "to": path})))
             c.commit()
 
     def purge_media(self, media_id: int, path: str, started_at: Any,
@@ -265,7 +289,7 @@ class Database:
             c.execute("""INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,
                            outcome, started_at, details) VALUES (%s,'purged','skipped','skipped',
                            'ok',%s,%s)""",
-                      (media_id, started_at, json.dumps(details | {"path": path})))
+                      (media_id, started_at, _dumps(details | {"path": path})))
             c.commit()
 
     DEDUP_COLS = ("ts", "action", "group_no", "media_id", "keeper_path", "file_path",
@@ -274,7 +298,7 @@ class Database:
 
     def record_dedup_action(self, row: dict[str, Any]) -> None:
         """Insert one aib.dedup_action row; duplicates (same action/path/ts) are ignored."""
-        vals = [json.dumps(row.get(k) or []) if k == "sidecars_copied" else row.get(k)
+        vals = [_dumps(row.get(k) or []) if k == "sidecars_copied" else row.get(k)
                 for k in self.DEDUP_COLS]
         with self.conn() as c:
             c.execute(f"INSERT INTO aib.dedup_action ({', '.join(self.DEDUP_COLS)}) VALUES "
@@ -309,7 +333,7 @@ class Database:
                 "details")
 
     def record_library_action(self, row: dict[str, Any]) -> int:
-        vals = [json.dumps(row.get(k) or {}, default=str) if k == "details" else row.get(k)
+        vals = [_dumps(row.get(k) or {}, default=str) if k == "details" else row.get(k)
                 for k in self.LIB_COLS]
         vals[3] = vals[3] or "book"
         with self.conn() as c:
@@ -398,7 +422,7 @@ class Database:
         if not fields:
             return
         cols = ", ".join(f"{k}=%s" for k in fields)
-        vals = [json.dumps(v) if k in ("probe", "media_info") else v for k, v in fields.items()]
+        vals = [_dumps(v) if k in ("probe", "media_info") else v for k, v in fields.items()]
         with self.conn() as c:
             c.execute(f"UPDATE aib.media_file SET {cols} WHERE id=%s", (*vals, media_id))
             c.commit()
@@ -448,7 +472,7 @@ class Database:
                        attempt, started_at, error, details, flow_run_id, task_run_id)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (media_id, action, from_stage, to_stage, outcome, attempt, started_at,
-                 error[:4000] if error else None, json.dumps(details or {}),
+                 error[:4000] if error else None, _dumps(details or {}),
                  flow_run_id, task_run_id))
             c.commit()
         return True
@@ -495,7 +519,7 @@ class Database:
                     "INSERT INTO aib.segment (media_id, seq, start_s, end_s, text, words) "
                     "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
                     (media_id, seg.seq, seg.start, seg.end, seg.text,
-                     json.dumps(seg.words) if seg.words is not None else None),
+                     _dumps(seg.words) if seg.words is not None else None),
                 ).fetchone()
                 ids.append(row["id"])
             c.execute(
@@ -562,7 +586,7 @@ class Database:
                      confidence=EXCLUDED.confidence, decision=EXCLUDED.decision,
                      rationale=EXCLUDED.rationale, status=EXCLUDED.status, created_at=now()
                    RETURNING id""",
-                (s.domain, s.source_path, s.target_path, json.dumps(s.metadata),
+                (s.domain, s.source_path, s.target_path, _dumps(s.metadata),
                  s.confidence, s.decision, s.rationale, s.media_kind, op, s.run_id, status),
             ).fetchone()
             c.commit()
@@ -604,14 +628,14 @@ class Database:
         with self.conn() as c:
             row = c.execute("INSERT INTO aib.scan_run (domain, params, flow_run_id) "
                             "VALUES (%s,%s,%s) RETURNING id",
-                            (domain, json.dumps(params), flow_run_id)).fetchone()
+                            (domain, _dumps(params), flow_run_id)).fetchone()
             c.commit()
             return row["id"]
 
     def finish_run(self, run_id: int, summary: dict[str, Any]) -> None:
         with self.conn() as c:
             c.execute("UPDATE aib.scan_run SET finished_at=now(), summary=%s WHERE id=%s",
-                      (json.dumps(summary), run_id))
+                      (_dumps(summary), run_id))
             c.commit()
 
     def latest_run(self, domain: str) -> dict[str, Any] | None:
