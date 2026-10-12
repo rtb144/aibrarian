@@ -29,7 +29,16 @@ from .jellyfin import JellyfinClient
 from .media import scan_root
 from .metrics import ACTION_SECONDS, ACTION_TOTAL
 from .ollama import OllamaClient
-from .probe import compact_probe, duration_of, extract_audio_cmd, has_audio, run_ffprobe
+from .probe import (
+    duration_of,
+    extract_audio_cmd,
+    has_audio,
+    is_english,
+    llm_view,
+    media_info,
+    run_ffprobe,
+    select_audio_stream,
+)
 from .status import ACTIONS, MAX_ATTEMPTS, Stage, should_give_up
 from .transcribe import (
     Transcriber,
@@ -181,13 +190,44 @@ def discover(ctx: Context, roots: list[str] | None = None) -> dict[str, int]:
     return stats
 
 
-def probe(ctx: Context, row: dict) -> Outcome:
+def store_probe(ctx: Context, row: dict) -> tuple[dict, dict]:
+    """ffprobe the file and persist full metadata + LLM view (idempotent)."""
     data = run_ffprobe(Path(row["path"]), runner=ctx.runner)
-    summary = compact_probe(data)
-    ctx.db.update_media_fields(row["id"], probe=summary, duration_s=duration_of(data))
+    info = media_info(data)
+    ctx.db.update_media_fields(row["id"], probe=llm_view(info), media_info=info,
+                               duration_s=duration_of(data), audio_layout=info["audio_layout"],
+                               probed_at=datetime.now(UTC))
+    return data, info
+
+
+def probe(ctx: Context, row: dict) -> Outcome:
+    data, info = store_probe(ctx, row)
     if not has_audio(data):
         return Outcome(Stage.SKIPPED, {"reason": "no audio stream"})
-    return Outcome(Stage.PROBED, {"duration_s": summary["duration"]})
+    return Outcome(Stage.PROBED, {"duration_s": info["container"]["duration"],
+                                  "audio_streams": len(info["audio"]),
+                                  "subtitle_streams": len(info["subtitles"]),
+                                  "chapters": len(info["chapters"]),
+                                  "audio_layout": info["audio_layout"]})
+
+
+def reprobe(ctx: Context, row: dict | int) -> dict[str, Any]:
+    """Refresh metadata of an item in any stage without changing its stage."""
+    row = ctx.db.get_media(row) if isinstance(row, int) else row
+    started = datetime.now(UTC)
+    flow_run_id, task_run_id = ctx.run_ids()
+    try:
+        _, info = store_probe(ctx, row)
+    except Exception as exc:
+        ctx.db.record_event(row["id"], "reprobe", row["stage"], "failed", started,
+                            error=f"{type(exc).__name__}: {exc}", flow_run_id=flow_run_id,
+                            task_run_id=task_run_id)
+        return {"id": row["id"], "outcome": "failed", "error": str(exc)}
+    details = {"audio_layout": info["audio_layout"], "audio_streams": len(info["audio"]),
+               "subtitle_streams": len(info["subtitles"]), "chapters": len(info["chapters"])}
+    ctx.db.record_event(row["id"], "reprobe", row["stage"], "info", started, details,
+                        flow_run_id=flow_run_id, task_run_id=task_run_id)
+    return {"id": row["id"], "outcome": "ok", **details}
 
 
 def _wav_path(ctx: Context, media_id: int) -> Path:
@@ -200,15 +240,30 @@ def extract_audio(ctx: Context, row: dict) -> Outcome:
     if sidecars.load_existing_sidecar(video, row["fingerprint"], s.whisper_model,
                                       s.reuse_legacy_sidecars) is not None:
         return Outcome(Stage.AUDIO_EXTRACTED, {"reused_sidecar": True})
+    info = row.get("media_info")
+    if not info:  # probed before media_info existed
+        _, info = store_probe(ctx, row)
+    sel = select_audio_stream(info)
+    if sel is None:
+        return Outcome(Stage.SKIPPED, {"reason": "no audio stream"})
     wav = _wav_path(ctx, row["id"])
     wav.parent.mkdir(parents=True, exist_ok=True)
-    if not (wav.exists() and wav.stat().st_size > 0):
+    marker = wav.with_suffix(".stream")  # which track the cached WAV came from
+    cached = (wav.exists() and wav.stat().st_size > 0 and marker.exists()
+              and marker.read_text() == str(sel["index"]))
+    if not cached:
         tmp = wav.with_suffix(".part.wav")
-        ctx.runner(extract_audio_cmd(video, tmp), check=True, capture_output=True)
+        ctx.runner(extract_audio_cmd(video, tmp, sel["index"]), check=True, capture_output=True)
         tmp.replace(wav)
-    ctx.db.update_media_fields(row["id"], audio_path=str(wav))
-    return Outcome(Stage.AUDIO_EXTRACTED, {"wav": str(wav), "bytes": wav.stat().st_size,
-                                           "work_dir": str(s.work_dir)})
+        marker.write_text(str(sel["index"]))
+    lang = "en" if sel["english"] else sel.get("language")
+    ctx.db.update_media_fields(row["id"], audio_path=str(wav), audio_stream_index=sel["index"],
+                               audio_language=lang, audio_layout=sel.get("layout"))
+    return Outcome(Stage.AUDIO_EXTRACTED, {
+        "wav": str(wav), "bytes": wav.stat().st_size, "stream_index": sel["index"],
+        "stream_language": sel.get("language"), "english": sel["english"],
+        "selection": sel["reason"], "layout": sel.get("layout"),
+        "audio_streams": len(info.get("audio") or [])})
 
 
 def transcribe(ctx: Context, row: dict) -> Outcome:
@@ -222,7 +277,9 @@ def transcribe(ctx: Context, row: dict) -> Outcome:
         wav = Path(row["audio_path"]) if row.get("audio_path") else None
         if wav is None or not wav.exists():
             raise FileNotFoundError(f"extracted audio missing for media {row['id']}")
-        result, reused = ctx.transcriber.transcribe(wav), False
+        # English track chosen -> force 'en'; otherwise configured language / autodetect
+        lang = "en" if is_english(row.get("audio_language")) else s.whisper_language
+        result, reused = ctx.transcriber.transcribe(wav, language=lang), False
     chunks = chunk_segments(result.segments, s.segment_chunk_seconds)
     ctx.db.save_segments(row["id"], chunks, row["fingerprint"], result.language,
                          s.whisper_model, result.duration)
@@ -234,6 +291,7 @@ def transcribe(ctx: Context, row: dict) -> Outcome:
             log.warning("sidecar write failed", extra={"media_id": row["id"], "error": str(exc)})
     if row.get("audio_path"):
         Path(row["audio_path"]).unlink(missing_ok=True)
+        Path(row["audio_path"]).with_suffix(".stream").unlink(missing_ok=True)
     if not chunks:
         return Outcome(Stage.SKIPPED, {"reason": "no speech detected",
                                        "language": result.language})
@@ -265,9 +323,7 @@ def catalog(ctx: Context, row: dict) -> Outcome:
     s = ctx.settings
     path = Path(row["path"])
     rel = str(path.relative_to(s.media_root)) if path.is_relative_to(s.media_root) else str(path)
-    parsed = identify(ctx.ollama, rel, {"format": {"duration": row.get("duration_s")},
-                                        "streams": (row.get("probe") or {}).get("streams", [])},
-                      {})
+    parsed = identify(ctx.ollama, rel, row.get("probe") or {"duration": row.get("duration_s")}, {})
     match, score = jellyfin_lookup(ctx.jellyfin, parsed)
     sug = make_suggestion(path, parsed, match, score, s.media_root, s.canonical_roots,
                           s.video_min_confidence, s.video_review_confidence)
@@ -285,3 +341,21 @@ ACTION_FUNCS: dict[str, Callable[[Context, dict], Outcome]] = {
     "probe": probe, "extract_audio": extract_audio, "transcribe": transcribe,
     "embed": embed, "catalog": catalog,
 }
+
+
+def reprobe_all(ctx: Context, only_missing: bool = True, limit: int | None = None,
+                batch: int = 200) -> dict[str, int]:
+    """Re-probe items already past ``discovered`` (stages are left untouched)."""
+    stats = {"ok": 0, "failed": 0}
+    after = 0
+    while True:
+        rows = ctx.db.reprobe_candidates(batch, only_missing, after)
+        if not rows:
+            break
+        for r in rows:
+            after = r["id"]
+            stats[reprobe(ctx, r)["outcome"]] += 1
+            if limit and sum(stats.values()) >= limit:
+                return stats
+        log.info("reprobe progress", extra=stats)
+    return stats

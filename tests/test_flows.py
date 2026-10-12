@@ -8,7 +8,7 @@ def test_scheduled_deployments_cannot_overlap():
 
     deps = {d.name: d for d in flows.deployments("all")}
     assert set(deps) == {"media-pipeline", "stage", "discover", "library-scan", "book-scan",
-                         "retry-failed", "openlibrary-import"}
+                         "retry-failed", "openlibrary-import", "reprobe"}
     for name in ("media-pipeline", "discover", "library-scan", "book-scan"):
         cl = deps[name].concurrency_limit
         limit = getattr(cl, "limit", cl)

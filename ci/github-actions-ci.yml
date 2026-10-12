@@ -45,7 +45,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[flows]"
-      - run: python -c "import aibrarian.flows as f; assert len(f.deployments('all')) == 7"
+      - run: python -c "import aibrarian.flows as f; assert len(f.deployments('all')) == 8"
 
   docker:
     runs-on: ubuntu-latest

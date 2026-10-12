@@ -17,6 +17,7 @@ DASHBOARD_HTML = """<!doctype html>
 <h1>aibrarian &middot; media pipeline</h1>
 <div id="summary" class="muted">loading&hellip;</div>
 <div class="cards" id="stages"></div>
+<h2>Audio layouts</h2><div class="cards" id="layouts"></div>
 <h2 id="listTitle">Failures</h2><table id="list"></table>
 <h2>Timeline <span id="tlTitle" class="muted"></span></h2><table id="timeline"></table>
 <h2>Recent events</h2><table id="events"></table>
@@ -33,15 +34,24 @@ async function loadStatus(){
   `backlog ${st.backlog} items · ETA ${fmt(st.eta.eta_s)} (median ${st.eta.median_gap_s??"?"}s/item)`;
  document.getElementById("stages").innerHTML=ORDER.map(s=>
   `<div class="card ${s}" onclick="loadStage('${s}')"><b>${st.stages[s]||0}</b>${s}</div>`).join("");
+ document.getElementById("layouts").innerHTML=Object.entries(st.audio_layouts||{}).map(([l,n])=>
+  `<div class="card" onclick="loadLayout('${esc(l)}')"><b>${n}</b>${esc(l)}</div>`).join("");
+}
+async function loadLayout(l){
+ document.getElementById("listTitle").textContent="Audio layout: "+l;
+ const rows=l==="unknown"?[]:await j("media?audio_layout="+encodeURIComponent(l)+"&limit=200");
+ document.getElementById("list").innerHTML="<tr><th>id</th><th>title</th><th>stage</th><th>layout</th><th>lang</th></tr>"+
+  rows.map(r=>`<tr class="click" onclick="loadTimeline(${r.id})"><td>${r.id}</td><td>${esc(r.title||r.path)}</td>`+
+  `<td>${r.stage}</td><td>${esc(r.audio_layout)}</td><td>${esc(r.audio_language)}</td></tr>`).join("");
 }
 async function loadStage(s){
  document.getElementById("listTitle").textContent="Stage: "+s;
  const rows=await j("status/stages/"+s+"?limit=200");
  document.getElementById("list").innerHTML="<tr><th>id</th><th>title</th><th>attempts</th>"+
-  "<th>failed at</th><th>error</th><th>since</th></tr>"+rows.map(r=>
+  "<th>failed at</th><th>error</th><th>since</th><th>audio</th></tr>"+rows.map(r=>
   `<tr class="click" onclick="loadTimeline(${r.id})"><td>${r.id}</td><td>${esc(r.title||r.path)}</td>`+
   `<td>${r.stage_attempts}</td><td>${esc(r.failed_stage)}</td><td><pre>${esc(r.last_error)}</pre></td>`+
-  `<td>${esc(r.stage_changed_at)}</td></tr>`).join("");
+  `<td>${esc(r.stage_changed_at)}</td><td>${esc(r.audio_layout)} ${esc(r.audio_language)}</td></tr>`).join("");
 }
 async function loadTimeline(id){
  const t=await j("media/"+id+"/timeline");

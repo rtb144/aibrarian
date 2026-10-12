@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="stage counts, backlog and ETA (was movie_eta.py)")
     tl = sub.add_parser("timeline", help="event history of one item")
     tl.add_argument("id", type=int)
+    rp = sub.add_parser("reprobe", help="refresh ffprobe metadata without changing stages")
+    rp.add_argument("--id", type=int)
+    rp.add_argument("--all", action="store_true", help="also items that already have media_info")
+    rp.add_argument("--limit", type=int)
     rf = sub.add_parser("retry-failed")
     rf.add_argument("--id", type=int)
 
@@ -206,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         _print(st)
     elif cmd == "timeline":
         _print(ctx.db.timeline(args.id))
+    elif cmd == "reprobe":
+        from .actions import reprobe, reprobe_all
+
+        _print(reprobe(ctx, args.id) if args.id else reprobe_all(ctx, not args.all, args.limit))
     elif cmd == "retry-failed":
         _print({"reset": ctx.db.retry_failed(args.id)})
     elif cmd == "library-scan":

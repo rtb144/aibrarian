@@ -13,7 +13,7 @@ from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .eta import estimate
 from .media import iter_files
 from .openlibrary import make_ol_lookup
-from .probe import read_audio_tags, run_ffprobe
+from .probe import compact_probe, read_audio_tags, run_ffprobe
 from .search import SearchService
 from .status import backlog_stages
 from .video_librarian import identify, jellyfin_lookup, make_suggestion
@@ -41,7 +41,7 @@ def library_scan(ctx: Context, max_items: int | None = None, resume: bool = True
                 counts["skipped_resume"] += 1
                 continue
             try:
-                probe = run_ffprobe(p, runner=ctx.runner)
+                probe = compact_probe(run_ffprobe(p, runner=ctx.runner))
             except Exception as exc:
                 probe = {"error": str(exc)}
             tags = read_audio_tags(p) if p.suffix.lower() in AUDIO_EXTENSIONS else {}
@@ -168,4 +168,5 @@ def pipeline_status(ctx: Context) -> dict[str, Any]:
     counts = ctx.db.stage_counts()
     backlog = sum(counts.get(st.value, 0) for st in backlog_stages())
     return {"stages": counts, "backlog": backlog,
+            "audio_layouts": ctx.db.audio_layout_counts(),
             "eta": estimate(ctx.db.completion_times("transcribe"), backlog)}

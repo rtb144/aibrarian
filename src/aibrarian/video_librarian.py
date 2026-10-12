@@ -19,7 +19,6 @@ from .jellyfin import JellyfinClient
 from .media import parse_name
 from .models import Decision, Suggestion
 from .ollama import OllamaClient
-from .probe import compact_probe
 
 KINDS = ("movie", "tv", "music", "unknown")
 MEDIA_SCHEMA: dict[str, Any] = {
@@ -86,7 +85,8 @@ def normalize_result(value: Any) -> dict[str, Any]:
     return out
 
 
-def build_prompt(rel_path: str, basic: dict, tags: dict, probe: dict) -> str:
+def build_prompt(rel_path: str, basic: dict, tags: dict, summary: dict) -> str:
+    """``summary`` is the small LLM view (``probe.llm_view``), never full metadata."""
     return (
         "You are a strict media filename parser. Return exactly one JSON object and no markdown.\n"
         f"JSON Schema: {json.dumps(MEDIA_SCHEMA)}\n"
@@ -95,14 +95,14 @@ def build_prompt(rel_path: str, basic: dict, tags: dict, probe: dict) -> str:
         "'Series - SXXEYY - Episode Title.ext'; music use 'NN - Track Title.ext'. "
         "Use the existing extension and a confidence from 0 to 1.\n"
         f"PATH: {rel_path}\nBASIC: {json.dumps(basic)}\n"
-        f"AUDIO_TAGS: {json.dumps(tags)}\nFFPROBE_SUMMARY: {json.dumps(compact_probe(probe))}"
+        f"AUDIO_TAGS: {json.dumps(tags)}\nFFPROBE_SUMMARY: {json.dumps(summary, default=str)}"
     )
 
 
-def identify(ollama: OllamaClient, rel_path: str, probe: dict, tags: dict) -> dict[str, Any]:
+def identify(ollama: OllamaClient, rel_path: str, summary: dict, tags: dict) -> dict[str, Any]:
     basic = parse_name(Path(rel_path).name)
     try:
-        return normalize_result(ollama.generate_json(build_prompt(rel_path, basic, tags, probe),
+        return normalize_result(ollama.generate_json(build_prompt(rel_path, basic, tags, summary),
                                                      MEDIA_SCHEMA))
     except Exception as exc:  # LLM down / bad JSON -> unknown, goes to review
         return empty_result(f"LLM error: {exc}")

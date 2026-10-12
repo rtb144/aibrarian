@@ -124,6 +124,15 @@ def book_scan_flow(paths: list[str] | None = None, resume: bool = True,
                               max_items, _run_ids()[0])
 
 
+@flow(name="reprobe")
+def reprobe_flow(only_missing: bool = True, limit: int | None = None) -> dict:
+    """Refresh ffprobe metadata for items already past 'discovered' without
+    resetting their stage (e.g. after the media_info upgrade)."""
+    from .actions import reprobe_all
+
+    return reprobe_all(ctx(), only_missing, limit)
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -154,6 +163,7 @@ def deployments(group: str) -> list:
            library_scan_flow.to_deployment("library-scan", cron="0 3 * * *", **one),
            book_scan_flow.to_deployment("book-scan", cron="30 * * * *", **one),
            retry_failed_flow.to_deployment("retry-failed", **one),
+           reprobe_flow.to_deployment("reprobe", **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]
 

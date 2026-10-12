@@ -30,8 +30,8 @@ stateDiagram-v2
 | Stage | Meaning | Next action | Resource tag |
 |---|---|---|---|
 | `discovered` | registered, nothing done yet | `probe` | `io` |
-| `probed` | ffprobe stored (duration, streams) | `extract_audio` | `cpu` |
-| `audio_extracted` | 16 kHz WAV ready, or a valid sidecar exists | `transcribe` | `gpu-whisper` |
+| `probed` | full ffprobe metadata stored in `media_info` (all streams with index; video fps/pix_fmt/profile/HDR10/HLG/Dolby Vision; audio codec/channels/layout/sample rate/bit rate/language/dispositions; subtitles with forced/default/SDH; container tags; chapters) plus a small LLM view in `probe` and `audio_layout` | `extract_audio` | `cpu` |
+| `audio_extracted` | 16 kHz WAV of the chosen track (`-map 0:<index>`: English default → first English → default → first, commentary tracks last), or a valid sidecar exists. `audio_stream_index` and `audio_language` are recorded; whisper is forced to `en` when an English track was chosen | `transcribe` | `gpu-whisper` |
 | `transcribed` | segments in Postgres, sidecars written | `embed` | `gpu-ollama` |
 | `embedded` | vectors in `movie_segments` + `movie_windows` | `catalog` | `gpu-ollama` |
 | `cataloged` | identified, Jellyfin-matched, placement suggestion recorded | none | |
@@ -117,3 +117,13 @@ rather than per-item pipelines. Their progress is tracked in `aib.scan_run`
 (params, summary, Prefect flow run id) and `aib.suggestion` (one row per file,
 with `status` open, applied, dismissed or failed). That is what lets an
 interrupted scan resume where it stopped.
+
+## Re-probing
+
+`aibrarian reprobe` (only items without `media_info`), `aibrarian reprobe --all`,
+`POST /media/{id}/reprobe`, or the `reprobe` deployment refresh the
+metadata of items in **any** stage without moving them. Each refresh writes an
+`outcome='info'` event. Media files are only read, never modified.
+`GET /media/{id}/info` returns the full metadata; `GET /media?audio_layout=5.1`
+and `GET /status/audio-layouts` cover the layout summary, which also appears on
+the dashboard.

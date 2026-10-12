@@ -23,7 +23,7 @@ def db():
     with d.conn() as c:
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
-    assert d.migrate() == ["001_init"]
+    assert d.migrate() == ["001_init", "002_media_info"]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -127,3 +127,18 @@ def test_known_files_and_try_lock(db):
             assert not b
     with db.try_lock(99) as c:
         assert c
+
+
+def test_media_info_columns_and_reprobe_queries(db):
+    mid = db.upsert_media([mf("/m/01-movies/r.mkv")])[0]["id"]
+    db.transition(mid, "probe", "discovered", "probed", "ok", datetime.now(UTC))
+    assert [r["id"] for r in db.reprobe_candidates(10)] == [mid]
+    db.update_media_fields(mid, media_info={"audio": []}, audio_layout="5.1",
+                           audio_stream_index=2, audio_language="en", probed_at=datetime.now(UTC))
+    assert db.reprobe_candidates(10) == []
+    assert [r["id"] for r in db.reprobe_candidates(10, only_missing=False)] == [mid]
+    db.record_event(mid, "reprobe", "probed", "info", datetime.now(UTC), {"x": 1})
+    assert db.timeline(mid)[-1]["outcome"] == "info"
+    assert db.get_media(mid)["stage"] == "probed"
+    assert db.audio_layout_counts() == {"5.1": 1}
+    assert db.list_media(audio_layout="5.1")[0]["audio_language"] == "en"

@@ -32,7 +32,7 @@ class TranscriptResult:
 class Transcriber(Protocol):
     model_name: str
 
-    def transcribe(self, path: Path) -> TranscriptResult: ...
+    def transcribe(self, path: Path, language: str | None = None) -> TranscriptResult: ...
 
 
 class WhisperTranscriber:
@@ -59,9 +59,10 @@ class WhisperTranscriber:
                                        compute_type=self.compute_type)
         return self._model
 
-    def transcribe(self, path: Path) -> TranscriptResult:
+    def transcribe(self, path: Path, language: str | None = None) -> TranscriptResult:
+        """``language`` overrides the configured one (None = autodetect)."""
         segs, info = self._load().transcribe(
-            str(path), language=self.language, vad_filter=True, beam_size=5,
+            str(path), language=language or self.language, vad_filter=True, beam_size=5,
             word_timestamps=True)
         raw = [
             RawSegment(s.start, s.end, s.text.strip(),

@@ -11,15 +11,27 @@ class FakeProc:
         self.stdout = stdout
 
 
+ffmpeg_calls: list = []
+
+
 def ffprobe_runner(audio=True):
     import json
 
     def run(cmd, **kw):
         if cmd[0] == "ffprobe":
-            streams = [{"codec_type": "video"}] + ([{"codec_type": "audio"}] if audio else [])
-            return FakeProc(json.dumps({"format": {"duration": "120.5"},
-                                        "streams": streams}).encode())
+            streams = [{"index": 0, "codec_type": "video", "codec_name": "hevc"}]
+            if audio:
+                streams += [
+                    {"index": 1, "codec_type": "audio", "codec_name": "ac3", "channels": 6,
+                     "channel_layout": "5.1(side)", "tags": {"language": "fre"},
+                     "disposition": {"default": 1}},
+                    {"index": 2, "codec_type": "audio", "codec_name": "eac3", "channels": 8,
+                     "channel_layout": "7.1", "tags": {"language": "eng"},
+                     "disposition": {"default": 0}}]
+            return FakeProc(json.dumps({"format": {"duration": "120.5"}, "streams": streams,
+                                        "chapters": []}).encode())
         if cmd[0] == "ffmpeg":
+            ffmpeg_calls.append(cmd)
             __import__("pathlib").Path(cmd[-1]).write_bytes(b"RIFF")
             return FakeProc()
         raise AssertionError(cmd)
@@ -31,9 +43,11 @@ class FakeTranscriber:
 
     def __init__(self):
         self.calls = 0
+        self.languages = []
 
-    def transcribe(self, path):
+    def transcribe(self, path, language=None):
         self.calls += 1
+        self.languages.append(language)
         return TranscriptResult([RawSegment(0, 5, "hello world", [(0, 1, "hello")]),
                                  RawSegment(5, 10, "second line")], "en", 10.0)
 
@@ -53,6 +67,12 @@ def test_full_pipeline_happy_path(ctx, tmp_path):
         assert run_action(ctx, action, row["id"]) == "ok", action
     m = ctx.db.media[row["id"]]
     assert m["stage"] == "cataloged" and m["duration_s"] == 120.5 and m["jellyfin_id"] == "jf1"
+    # English track (index 2) chosen over the French default, and whisper forced to en
+    assert ffmpeg_calls[-1][ffmpeg_calls[-1].index("-map") + 1] == "0:2"
+    assert m["audio_stream_index"] == 2 and m["audio_language"] == "en" and tr.languages == ["en"]
+    assert m["audio_layout"] == "7.1" and m["media_info"]["audio"][0]["layout"] == "5.1"
+    ex = next(e for e in ctx.db.events if e["action"] == "extract_audio")["details"]
+    assert ex["stream_index"] == 2 and ex["stream_language"] == "eng" and ex["english"]
     assert [e["action"] for e in ctx.db.events] == ["probe", "extract_audio", "transcribe",
                                                     "embed", "catalog"]
     assert video.with_suffix(".srt").exists()  # sidecar written
@@ -162,6 +182,9 @@ class ApiDB:
     def __init__(self):
         self.row = {"id": 1, "path": "/media/01-movies/A/A.mkv", "title": "A", "stage": "failed"}
 
+    def audio_layout_counts(self):
+        return {"5.1": 2, "stereo": 1}
+
     def stage_counts(self):
         return {"cataloged": 3, "discovered": 2, "transcribed": 1, "failed": 1}
 
@@ -211,3 +234,20 @@ def test_metrics_and_dashboard(client):
 def test_legacy_location_route(client):
     loc = client.get("/movies/1/location").json()
     assert loc["srt_path"] == "/media/01-movies/A/A.srt"
+
+
+def test_reprobe_keeps_stage(ctx):
+    ctx.runner = ffprobe_runner()
+    row = ctx.db.add(path="/x.mkv", stage="embedded")
+    ctx.db.record_event = lambda *a, **k: ctx.db.events.append({"a": a, "k": k})
+    ctx.db.reprobe_candidates = lambda n, only, after: [ctx.db.get_media(row["id"])] if after == 0 else []
+    from aibrarian.actions import reprobe_all
+
+    assert reprobe_all(ctx) == {"ok": 1, "failed": 0}
+    m = ctx.db.media[row["id"]]
+    assert m["stage"] == "embedded" and m["audio_layout"] == "7.1" and m["probed_at"]
+    assert ctx.db.events[-1]["a"][3] == "info"
+
+
+def test_status_includes_audio_layouts(client):
+    assert client.get("/status").json()["audio_layouts"] == {"5.1": 2, "stereo": 1}

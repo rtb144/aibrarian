@@ -141,8 +141,29 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
     @app.get("/media")
     @app.get("/movies")
     def list_media(status: str | None = None, kind: str | None = "video",
+                   audio_layout: str | None = None,
                    limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)):
-        return [with_locations(m) for m in c().db.list_media(status, kind, limit, offset)]
+        return [with_locations(m)
+                for m in c().db.list_media(status, kind, limit, offset, audio_layout)]
+
+    @app.get("/media/{media_id}/info")
+    def media_info(media_id: int):
+        """Full stored ffprobe metadata (streams, HDR, subtitles, chapters)."""
+        m = need(media_id)
+        return {"id": media_id, "audio_layout": m.get("audio_layout"),
+                "audio_stream_index": m.get("audio_stream_index"),
+                "audio_language": m.get("audio_language"), "probed_at": m.get("probed_at"),
+                "media_info": m.get("media_info")}
+
+    @app.post("/media/{media_id}/reprobe")
+    def reprobe_one(media_id: int):
+        from .actions import reprobe
+
+        return reprobe(c(), need(media_id))
+
+    @app.get("/status/audio-layouts")
+    def audio_layouts():
+        return c().db.audio_layout_counts()
 
     @app.get("/movies/lookup")
     def lookup(title: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50)):

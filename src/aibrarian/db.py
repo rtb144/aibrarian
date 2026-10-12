@@ -156,14 +156,47 @@ class Database:
             return c.execute("SELECT * FROM aib.media_file WHERE path=%s", (path,)).fetchone()
 
     def list_media(self, stage: str | None = None, kind: str | None = None,
-                   limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+                   limit: int = 100, offset: int = 0,
+                   audio_layout: str | None = None) -> list[dict[str, Any]]:
         with self.conn() as c:
             return c.execute(
                 "SELECT id, path, root, kind, title, year, season, episode, stage, "
-                "duration_s, jellyfin_id FROM aib.media_file WHERE NOT missing "
+                "duration_s, jellyfin_id, audio_layout, audio_language FROM aib.media_file "
+                "WHERE NOT missing "
                 "AND (%s::text IS NULL OR stage=%s) AND (%s::text IS NULL OR kind=%s) "
+                "AND (%s::text IS NULL OR audio_layout=%s) "
                 "ORDER BY id LIMIT %s OFFSET %s",
-                (stage, stage, kind, kind, limit, offset)).fetchall()
+                (stage, stage, kind, kind, audio_layout, audio_layout, limit, offset)).fetchall()
+
+    def reprobe_candidates(self, limit: int, only_missing: bool = True,
+                           after_id: int = 0) -> list[dict[str, Any]]:
+        """Videos past ``discovered`` (any stage) needing fresh metadata, by id cursor."""
+        with self.conn() as c:
+            return c.execute(
+                "SELECT * FROM aib.media_file WHERE kind='video' AND NOT missing "
+                "AND stage <> 'discovered' AND (NOT %s OR media_info IS NULL) AND id > %s "
+                "ORDER BY id LIMIT %s", (only_missing, after_id, limit)).fetchall()
+
+    def record_event(self, media_id: int, action: str, stage: str, outcome: str,
+                     started_at: Any, details: dict[str, Any] | None = None,
+                     error: str | None = None, flow_run_id: str | None = None,
+                     task_run_id: str | None = None) -> None:
+        """Bookkeeping event that does not change the item's stage."""
+        with self.conn() as c:
+            c.execute(
+                """INSERT INTO aib.media_event (media_id, action, from_stage, to_stage, outcome,
+                       started_at, error, details, flow_run_id, task_run_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (media_id, action, stage, stage, outcome, started_at, error,
+                 json.dumps(details or {}), flow_run_id, task_run_id))
+            c.commit()
+
+    def audio_layout_counts(self) -> dict[str, int]:
+        with self.conn() as c:
+            rows = c.execute("SELECT coalesce(audio_layout, 'unknown') AS l, count(*) AS n "
+                             "FROM aib.media_file WHERE NOT missing AND kind='video' "
+                             "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+        return {r["l"]: r["n"] for r in rows}
 
     def update_path(self, old: str, new: str) -> None:
         with self.conn() as c:
@@ -171,14 +204,16 @@ class Database:
             c.commit()
 
     def update_media_fields(self, media_id: int, **fields: Any) -> None:
-        allowed = {"duration_s", "probe", "audio_path", "jellyfin_id", "title", "year"}
+        allowed = {"duration_s", "probe", "audio_path", "jellyfin_id", "title", "year",
+                   "media_info", "audio_layout", "audio_stream_index", "audio_language",
+                   "probed_at"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"cannot update {bad}")
         if not fields:
             return
         cols = ", ".join(f"{k}=%s" for k in fields)
-        vals = [json.dumps(v) if k == "probe" else v for k, v in fields.items()]
+        vals = [json.dumps(v) if k in ("probe", "media_info") else v for k, v in fields.items()]
         with self.conn() as c:
             c.execute(f"UPDATE aib.media_file SET {cols} WHERE id=%s", (*vals, media_id))
             c.commit()
@@ -417,7 +452,8 @@ class Database:
         with self.conn() as c:
             return c.execute(
                 "SELECT id, path, title, stage, failed_stage, stage_attempts, last_error, "
-                "stage_changed_at FROM aib.media_file WHERE stage=%s AND NOT missing "
+                "stage_changed_at, audio_layout, audio_language FROM aib.media_file "
+                "WHERE stage=%s AND NOT missing "
                 "ORDER BY stage_changed_at DESC LIMIT %s OFFSET %s",
                 (stage, limit, offset)).fetchall()
 
