@@ -194,13 +194,50 @@ def isbns_in_name(name: str) -> list[str]:
 _ART = re.compile(r"^(the|a|an) ")
 
 
-def ntitle(title: str | None) -> str:
+def as_str(v: Any) -> str | None:
+    """Coerce arbitrary metadata (pypdf IndirectObject, bytes, lists, ...) to a clean str."""
+    for _ in range(10):
+        go = getattr(v, "get_object", None)
+        if not callable(go):
+            break
+        try:
+            nv = go()
+        except Exception:
+            return None
+        if nv is v:
+            break
+        v = nv
+    if v is None:
+        return None
+    if isinstance(v, (bytes, bytearray)):
+        b = bytes(v)
+        for enc in (("utf-16",) if b[:2] in (b"\xfe\xff", b"\xff\xfe") else ()) + ("utf-8", "latin-1"):
+            try:
+                v = b.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+    elif isinstance(v, (list, tuple, set)):
+        parts = [p for p in (as_str(x) for x in v) if p]
+        v = "; ".join(parts)
+    elif not isinstance(v, str):
+        try:
+            v = str(v)
+        except Exception:
+            return None
+    v = v.replace("\x00", "").strip()
+    return v or None
+
+
+def ntitle(title: Any) -> str:
     """Normalized main title (no subtitle, no leading article)."""
+    title = as_str(title)
     t = re.split(r":| - |\(", title or "", maxsplit=1)[0]
     return _ART.sub("", norm(t))
 
 
-def surname(name: str | None) -> str:
+def surname(name: Any) -> str:
+    name = as_str(name)
     if not name:
         return ""
     name = name.split(";")[0].split("&")[0].split(" and ")[0]
@@ -474,9 +511,13 @@ class OLIndex:
 
     def lookup(self, title: str | None, author: str | None,
                isbns: Iterable[str] | str | None = None) -> dict[str, Any] | None:
-        if isinstance(isbns, str):
+        title, author = as_str(title), as_str(author)
+        if isbns is None or isinstance(isbns, (str, bytes, bytearray)) or hasattr(isbns, "get_object"):
             isbns = [isbns]
         for i in isbns or []:
+            i = as_str(i)
+            if not i:
+                continue
             hit = self.by_isbn(i)
             if hit:
                 return hit

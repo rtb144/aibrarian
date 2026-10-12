@@ -84,7 +84,21 @@ def pdf_metadata(path: Path) -> dict[str, Any]:
     except ImportError:
         return {}
     info = PdfReader(str(path)).metadata or {}
-    return {"title": info.get("/Title"), "author": info.get("/Author")}
+    return clean_metadata({"title": info.get("/Title"), "author": info.get("/Author")})
+
+
+def clean_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Resolve IndirectObjects and coerce every scalar value to a clean str (or None)."""
+    from .olindex import as_str
+    out: dict[str, Any] = {}
+    for k, v in meta.items():
+        if isinstance(v, dict):
+            out[k] = clean_metadata(v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool) and k in ("year",):
+            out[k] = v
+        else:
+            out[k] = as_str(v)
+    return out
 
 
 def extract_metadata(path: Path) -> dict[str, Any]:
@@ -92,13 +106,14 @@ def extract_metadata(path: Path) -> dict[str, Any]:
     meta: dict[str, Any] = {"filename": path.name, "media_type": kind}
     try:
         if path.suffix.lower() == ".epub":
-            meta |= epub_metadata(path)
+            meta |= clean_metadata(epub_metadata(path))
         elif path.suffix.lower() == ".pdf":
             meta |= pdf_metadata(path)
         elif kind == "audio":
             tags = read_audio_tags(path)
             meta |= {"title": tags.get("album") or tags.get("title"),
                      "author": tags.get("artist"), "tags": tags}
+            meta |= clean_metadata({k: meta.get(k) for k in ("title", "author")})
     except Exception as exc:  # corrupt files still get filename-based handling
         meta["extract_error"] = str(exc)
     return {k: v for k, v in meta.items() if v not in (None, "")}
