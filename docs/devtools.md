@@ -75,3 +75,5 @@ Notes / TODO(verify):
 
 ## LAN access
 Devtools ports (3001 DeepWiki UI, 8001 DeepWiki API, 3002 Memgraph Lab, 8085 Code-Graph-RAG MCP) are published on all interfaces for LAN use, e.g. http://192.168.68.52:3001. Memgraph Bolt (7687/7444) stays on 127.0.0.1. There is no auth on these UIs; keep them off the internet.
+
+Code-Graph-RAG MCP refuses to bind to 0.0.0.0 without a token: set `MCP_HTTP_AUTH_TOKEN` in `.env` (e.g. `openssl rand -hex 32`); MCP clients must send it as a bearer token.

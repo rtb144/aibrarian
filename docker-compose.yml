@@ -228,7 +228,9 @@ services:
     profiles: [devtools]
     image: ghcr.io/vitali87/code-graph-rag:latest
     command: ["mcp-server", "--transport", "http", "--host", "0.0.0.0", "--port", "8080"]
-    environment: *cgr-env
+    environment:
+      <<: *cgr-env
+      MCP_HTTP_AUTH_TOKEN: ${MCP_HTTP_AUTH_TOKEN:?set MCP_HTTP_AUTH_TOKEN in .env (openssl rand -hex 32)}
     volumes: ["./:/repo:ro"]
     ports: ["8085:8080"]
     restart: unless-stopped
