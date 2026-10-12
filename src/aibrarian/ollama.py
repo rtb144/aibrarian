@@ -12,6 +12,24 @@ from .config import Settings
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# Task prefixes per embedding model family: (query prefix, document prefix).
+# nomic-embed-text: model card "search_query: " / "search_document: ".
+# embeddinggemma(-2): Google model card (huggingface.co/google/embeddinggemma-2, prompts
+#   Retrieval-query / Retrieval-document): "task: search result | query: " /
+#   "title: none | text: " (no title -> "none").
+EMBED_PREFIXES: dict[str, tuple[str, str]] = {
+    "nomic-embed-text": ("search_query: ", "search_document: "),
+    "embeddinggemma": ("task: search result | query: ", "title: none | text: "),
+    "embeddinggemma-2": ("task: search result | query: ", "title: none | text: "),
+}
+DEFAULT_PREFIXES = EMBED_PREFIXES["nomic-embed-text"]  # historical behaviour for unknown models
+
+
+def embed_prefixes(model: str) -> tuple[str, str]:
+    """``(query_prefix, document_prefix)`` for an Ollama model name (tag ignored)."""
+    base = model.split("/")[-1].split(":")[0].lower()
+    return EMBED_PREFIXES.get(base, DEFAULT_PREFIXES)
+
 
 class OllamaClient:
     def __init__(self, base_url: str, embed_model: str, llm_model: str,
@@ -24,17 +42,30 @@ class OllamaClient:
     def from_settings(cls, s: Settings) -> OllamaClient:
         return cls(s.ollama_url, s.embed_model, s.llm_model, s.llm_timeout_s)
 
-    def embed(self, texts: list[str], prefix: str = "search_document: ") -> list[list[float]]:
-        """Embed texts. nomic-embed-text expects task prefixes for best quality."""
+    def embed(self, texts: list[str], prefix: str | None = None, model: str | None = None,
+              keep_alive: str | None = None) -> list[list[float]]:
+        """Embed documents with the model's task prefix (see :data:`EMBED_PREFIXES`)."""
         if not texts:
             return []
-        r = self.http.post("/api/embed", json={
-            "model": self.embed_model, "input": [prefix + t for t in texts]})
+        model = model or self.embed_model
+        prefix = embed_prefixes(model)[1] if prefix is None else prefix
+        body: dict[str, Any] = {"model": model, "input": [prefix + t for t in texts]}
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+        r = self.http.post("/api/embed", json=body)
         r.raise_for_status()
         return r.json()["embeddings"]
 
-    def embed_query(self, text: str) -> list[float]:
-        return self.embed([text], prefix="search_query: ")[0]
+    def embed_query(self, text: str, model: str | None = None,
+                    keep_alive: str | None = None) -> list[float]:
+        model = model or self.embed_model
+        return self.embed([text], embed_prefixes(model)[0], model, keep_alive)[0]
+
+    def loaded_models(self) -> list[dict[str, Any]]:
+        """``/api/ps``: models in memory with ``size_vram``."""
+        r = self.http.get("/api/ps")
+        r.raise_for_status()
+        return r.json().get("models") or []
 
     def chat_json(self, system: str, user: str) -> dict[str, Any]:
         """Ask the LLM for a JSON object; tolerant of <think> blocks / code fences."""

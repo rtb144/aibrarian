@@ -369,3 +369,49 @@ How the scorer uses it (also for old suggestions, at `books autoapply` time):
   the Open Library title, and `calibredb add` gets `--identifier openlibrary:OL…M` (or `…W`)
   and the ISBN. Series are not in these columns, so series still come from the epub /
   title cleaning.
+
+## Embedding model A/B (`embed-eval`)
+
+Compares a candidate embedding model (e.g. `embeddinggemma-2`) with the production
+`EMBED_MODEL` (`nomic-embed-text`) without touching production: everything goes to separate
+Qdrant collections `eval_<model>_segments` / `eval_<model>_windows`, state and reports to
+`/data/reports/embed-eval/`. Postgres is only read.
+
+Task prefixes come from a small registry (`aibrarian.ollama.EMBED_PREFIXES`, default for
+unknown models = nomic, i.e. unchanged behaviour):
+
+| model | query prefix | document prefix | source |
+|---|---|---|---|
+| nomic-embed-text | `search_query: ` | `search_document: ` | nomic model card |
+| embeddinggemma / embeddinggemma-2 | `task: search result \| query: ` | `title: none \| text: ` | Google model card (HF `google/embeddinggemma-2`, prompts `Retrieval-query` / `Retrieval-document`) |
+
+Documents use `title: none` on purpose (the movie title would leak the answer into the eval).
+
+* `build --model M --movies 20`: picks 20 movies of `01-movies` with ≥ 40 segments, evenly
+  spaced by duration (deterministic; stored in `state.json`), embeds segments + windows with
+  the baseline and `M` in batches of 16, 0.2 s pause, `keep_alive=2m`, `nice 10`. Resumable per
+  (model, movie); `--reselect` picks again.
+* `run`: query set (cached in `queries.json`, `--regen` to rebuild): 20 exact quotes, 20
+  paraphrases and 20 "scene where …" descriptions written by `qwen3:14b`, each with ground
+  truth (movie + time). `--queries file.jsonl` adds `{"query", "movie_id", "start", "end"}`
+  rows (without ground truth they are only shown). Hit = right movie and within ±30 s
+  (`--tolerance`). Metrics per model × index (segments / windows) × query type: R@1/5/10, MRR,
+  plus median query latency (embed + search), embed throughput (texts/s during build) and
+  VRAM from Ollama `/api/ps`. Writes `latest.md/json` and `report-<ts>.md/json`.
+* `/embed-eval/ui`: latest report + one query box showing the top 5 of every built model
+  side by side (read-only; it embeds the query with each model).
+* `cleanup`: drops every `eval_*` collection (reports and the movie pick are kept).
+
+GPU note: `OLLAMA_MAX_LOADED_MODELS=2` keeps `qwen3:14b` + `nomic-embed-text` resident. Loading
+the candidate evicts the least recently used one for a few minutes; the next production call
+reloads it (seconds, no failures). Run the build when the pipeline is quiet if possible.
+CPU/disk: the build is GPU-bound and light on disk (Qdrant upserts of ~a few 10k points), so it
+can run alongside `openlibrary-index`.
+
+```bash
+dc exec ollama ollama pull embeddinggemma-2
+dc exec aibrarian-api aibrarian embed-eval build --model embeddinggemma-2 --movies 20
+dc exec aibrarian-api aibrarian embed-eval run
+dc exec aibrarian-api aibrarian embed-eval query "scene where they argue about the money"
+dc exec aibrarian-api aibrarian embed-eval cleanup
+```

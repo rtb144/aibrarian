@@ -27,6 +27,7 @@ from .dashboard import (
     DASHBOARD_HTML,
     DEDUP_UI_HTML,
     DUPLICATES_UI_HTML,
+    EMBED_EVAL_UI_HTML,
     LIBRARY_LOG_UI_HTML,
     SEARCH_UI_HTML,
 )
@@ -315,6 +316,41 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
     @app.get("/library-log/ui", response_class=HTMLResponse)
     def library_log_ui() -> str:
         return LIBRARY_LOG_UI_HTML
+
+    # -- embedding A/B (read-only) -----------------------------------------
+    def _eval():
+        from .embedeval import Harness
+
+        return Harness(c().settings, c().db, c().ollama, say=lambda m: log.info(m))
+
+    @app.get("/embed-eval/ui", response_class=HTMLResponse)
+    def embed_eval_ui() -> str:
+        return EMBED_EVAL_UI_HTML
+
+    @app.get("/embed-eval/latest")
+    def embed_eval_latest():
+        h = _eval()
+        md = h.out / "latest.md"
+        return {"report": h.latest(), "markdown": md.read_text() if md.exists() else None,
+                "models": list(h.state()["models"]), "movies": h.state()["movies"]}
+
+    @app.get("/embed-eval/query")
+    def embed_eval_query(q: str = Query(..., min_length=2), k: int = Query(5, le=20)):
+        h = _eval()
+        out = {}
+        for m in h.state()["models"]:
+            try:
+                r = h.search(m, q, k)
+            except Exception as exc:
+                out[m] = {"error": str(exc)}
+                continue
+            out[m] = {ix: [{"title": x["payload"].get("title"),
+                            "movie_id": x["payload"].get("movie_id"),
+                            "start": x["payload"].get("start"), "end": x["payload"].get("end"),
+                            "text": x["payload"].get("text"), "score": round(x["score"], 4)}
+                           for x in r[ix][:k]] for ix in ("segments", "windows")}
+            out[m]["latency_ms"] = round(r["embed_ms"] + r["search_ms"], 1)
+        return out
 
     @app.get("/dedup/ui", response_class=HTMLResponse)
     def dedup_ui() -> str:

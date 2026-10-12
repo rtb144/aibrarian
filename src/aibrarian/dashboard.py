@@ -291,3 +291,41 @@ async function go(off){
 for(const [k,v] of new URLSearchParams(location.search))if($(k))$(k).value=v;
 go(0);
 </script></body></html>"""
+
+
+EMBED_EVAL_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian embedding A/B</title>
+<style>body{font-family:system-ui,sans-serif;margin:1.5em;max-width:1400px}
+table{border-collapse:collapse;margin:.5em 0}td,th{border:1px solid #ccc;padding:3px 7px;
+font-size:13px;vertical-align:top}th{background:#f3f3f3}.cols{display:flex;gap:1em}
+.cols>div{flex:1;min-width:0}small{color:#666}input{width:40em;padding:4px}</style></head>
+<body><h2>Embedding A/B (read-only)</h2>
+<p><small>Eval collections only (<code>eval_*</code>); production search is untouched.
+Build/run with <code>aibrarian embed-eval</code>.</small></p>
+<form id="f"><input id="q" placeholder="type a quote or 'scene where ...'">
+<select id="ix"><option>windows</option><option>segments</option></select>
+<button>Search both</button></form><div id="res" class="cols"></div>
+<h3>Latest report</h3><div id="rep">loading…</div>
+<script>
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const t=s=>s==null?'':new Date(s*1000).toISOString().substr(11,8);
+function md(m){ // tiny markdown: tables + headings + paragraphs
+  let h='',rows=[];const flush=()=>{if(rows.length){h+='<table>'+rows.map((r,i)=>
+   '<tr>'+r.map(c=>i?'<td>'+esc(c)+'</td>':'<th>'+esc(c)+'</th>').join('')+'</tr>').join('')
+   +'</table>';rows=[]}};
+  for(const l of m.split('\n')){if(l.startsWith('|')){if(!/^\\|[-| ]+\\|$/.test(l))
+   rows.push(l.slice(1,-1).split('|').map(x=>x.trim().replace(/`/g,'')));continue}
+   flush();if(l.startsWith('# '))h+='<h4>'+esc(l.slice(2))+'</h4>';else if(l)h+='<p>'+esc(l)+'</p>'}
+  flush();return h}
+fetch('latest').then(r=>r.json()).then(d=>{document.getElementById('rep').innerHTML=
+ d.markdown?md(d.markdown):'No report yet. Models built: '+esc(d.models.join(', ')||'none')});
+document.getElementById('f').onsubmit=async e=>{e.preventDefault();
+ const q=document.getElementById('q').value,ix=document.getElementById('ix').value;
+ const box=document.getElementById('res');box.textContent='searching…';
+ const d=await (await fetch('query?q='+encodeURIComponent(q))).json();
+ box.innerHTML=Object.entries(d).map(([m,r])=>'<div><h3>'+esc(m)+' <small>'+
+  esc(r.latency_ms)+' ms</small></h3>'+(r.error?'<p>'+esc(r.error)+'</p>':'<table><tr><th>#</th>'+
+  '<th>movie</th><th>time</th><th>score</th><th>text</th></tr>'+r[ix].map((x,i)=>'<tr><td>'+
+  (i+1)+'</td><td>'+esc(x.title)+'</td><td>'+t(x.start)+'</td><td>'+x.score+'</td><td>'+
+  esc((x.text||'').slice(0,300))+'</td></tr>').join('')+'</table>')+'</div>').join('')};
+</script></body></html>"""

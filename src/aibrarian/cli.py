@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -186,6 +188,27 @@ def build_parser() -> argparse.ArgumentParser:
     olk.add_argument("--author")
     olk.add_argument("--isbn", action="append", default=[])
 
+    ee = sub.add_parser("embed-eval", help="A/B test an embedding model (separate collections)")
+    ees = ee.add_subparsers(dest="ee_cmd", required=True)
+    eb = ees.add_parser("build", help="embed N movies with baseline + candidate (resumable)")
+    eb.add_argument("--model", required=True, help="candidate Ollama model, e.g. embeddinggemma-2")
+    eb.add_argument("--movies", type=int, default=20)
+    eb.add_argument("--batch", type=int, default=16)
+    eb.add_argument("--pause", type=float, default=0.2, help="seconds between batches")
+    eb.add_argument("--keep-alive", default="2m")
+    eb.add_argument("--reselect", action="store_true", help="pick the movies again")
+    eb.add_argument("--no-baseline", action="store_true")
+    er = ees.add_parser("run", help="generate queries, score all built models, write the report")
+    er.add_argument("--model", action="append", help="limit to these models")
+    er.add_argument("--queries", type=Path, help="extra user queries (JSON list / JSONL)")
+    er.add_argument("--per-type", type=int, default=20)
+    er.add_argument("--regen", action="store_true", help="regenerate the query set")
+    er.add_argument("--tolerance", type=float, default=30.0)
+    er.add_argument("--json", action="store_true")
+    eq = ees.add_parser("query", help="top 5 for one query from every built model")
+    eq.add_argument("text")
+    ees.add_parser("cleanup", help="drop all eval_* Qdrant collections")
+
     gd = sub.add_parser("gen-docs", help="(was gen_docs.py)")
     gd.add_argument("paths", nargs="*", type=Path)
     gd.add_argument("--out", type=Path, default=Path("docs/reference"))
@@ -241,6 +264,32 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         for tag, n in CONCURRENCY.items():
             subprocess.run(["prefect", "concurrency-limit", "create", tag, str(n)], check=False)
+        return 0
+
+    if cmd == "embed-eval":
+        from . import embedeval
+        from .db import Database
+        from .ollama import OllamaClient
+
+        h = embedeval.Harness(s, Database(s.database_url), OllamaClient.from_settings(s),
+                              say=lambda m: print(m, file=sys.stderr, flush=True))
+        if args.ee_cmd == "build":
+            with contextlib.suppress(OSError):
+                os.nice(10)  # low CPU priority next to the pipeline
+            h.build(args.model, args.movies, args.batch, args.pause, args.keep_alive,
+                    args.reselect, not args.no_baseline)
+        elif args.ee_cmd == "run":
+            res = h.run(args.model, args.queries, args.per_type, args.regen, args.tolerance)
+            print(json.dumps(res, indent=1, default=str) if args.json
+                  else embedeval.format_table(res))
+            print(f"report: {h.out / 'latest.md'}", file=sys.stderr)
+        elif args.ee_cmd == "query":
+            _print({m: {ix: [(x["payload"].get("title"), round(x["payload"].get("start", 0)),
+                              round(x["score"], 3)) for x in r[ix][:5]]
+                        for ix in ("segments", "windows")}
+                    for m in h.state()["models"] for r in [h.search(m, args.text, 5)]})
+        else:
+            _print({"dropped": h.cleanup()})
         return 0
 
     if cmd == "openlibrary":

@@ -74,6 +74,15 @@ class VectorStore:
         r.raise_for_status()
         return int(r.json()["result"]["count"])
 
+    def drop(self) -> bool:
+        r = self.http.delete(f"/collections/{self.collection}")
+        return r.status_code == 200
+
+    def collections(self) -> list[str]:
+        r = self.http.get("/collections")
+        r.raise_for_status()
+        return [c["name"] for c in r.json()["result"]["collections"]]
+
     def ping(self) -> bool:
         try:
             return self.http.get("/readyz").status_code == 200

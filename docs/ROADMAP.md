@@ -204,6 +204,14 @@ you go (edit this file, or copy it into Obsidian).
   Do: `dc exec aibrarian-api aibrarian srt-report --log /data/old-reports/<move_log>.jsonl` then `sync-subtitles --log … --apply`
   Done when: re-running `srt-report` shows fewer `lost_after_move` entries.
 
+- [ ] **5.9 Embedding model decision: switch to EmbeddingGemma 2 or stay on nomic-embed-text.**
+  Do: `aibrarian embed-eval build --model embeddinggemma-2`, `embed-eval run`, eyeball
+  `/embed-eval/ui` (docs/operations.md "Embedding model A/B").
+  Switch only if it clearly wins on paraphrase + scene R@5/MRR without a latency/VRAM problem;
+  switching = `EMBED_MODEL=embeddinggemma-2`, recreate `movie_segments`/`movie_windows`, re-embed
+  everything (reprocess the `embed` stage). Then `embed-eval cleanup`.
+  Done when: the decision and the report numbers are written down here.
+
 ## Phase 6: Retire the old stack (after about a week of good runs)
 
 - [ ] **6.1 Make sure the new stack has run cleanly for 7 days.**

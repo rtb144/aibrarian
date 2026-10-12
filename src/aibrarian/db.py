@@ -515,6 +515,15 @@ class Database:
                 (list(ids),),
             ).fetchall()
 
+    def embed_eval_candidates(self, root: str, min_segments: int = 40) -> list[dict[str, Any]]:
+        """Transcribed media of one root (read-only; embedding A/B harness)."""
+        with self.conn() as c:
+            return c.execute(
+                "SELECT m.id, m.title, m.duration_s, count(s.id) AS segments "
+                "FROM aib.media_file m JOIN aib.segment s ON s.media_id = m.id "
+                "WHERE m.root = %s AND NOT m.missing GROUP BY m.id "
+                "HAVING count(s.id) >= %s ORDER BY m.id", (root, min_segments)).fetchall()
+
     def segments_for_media(self, media_id: int) -> list[dict[str, Any]]:
         with self.conn() as c:
             return c.execute(
