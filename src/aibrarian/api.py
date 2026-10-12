@@ -18,7 +18,8 @@ from fastapi.responses import HTMLResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
-from . import __version__, services
+from aibrarian import __version__
+from . import services
 from .actions import Context, RetryableError, run_action
 from .config import get_settings
 from .dashboard import DASHBOARD_HTML, DUPLICATES_UI_HTML, SEARCH_UI_HTML
