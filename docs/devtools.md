@@ -72,3 +72,6 @@ Notes / TODO(verify):
 - **DeepWiki** is for reading: narrative docs and diagrams for onboarding or a refresher.
 - **Code-Graph-RAG** is for precise questions: "who calls `run_action`?", "what touches `aib.media_event`?", impact analysis before a refactor, and MCP access for coding agents.
 - `aibrarian gen-docs` (the old `gen_docs.py`) still exists for plain Markdown reference pages in an Obsidian vault.
+
+## LAN access
+Devtools ports (3001 DeepWiki UI, 8001 DeepWiki API, 3002 Memgraph Lab, 8085 Code-Graph-RAG MCP) are published on all interfaces for LAN use, e.g. http://192.168.68.52:3001. Memgraph Bolt (7687/7444) stays on 127.0.0.1. There is no auth on these UIs; keep them off the internet.

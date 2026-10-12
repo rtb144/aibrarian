@@ -174,12 +174,12 @@ services:
     environment:
       PORT: "8001"
       NODE_ENV: production
-      SERVER_BASE_URL: http://localhost:8001
+      SERVER_BASE_URL: ${DEEPWIKI_SERVER_BASE_URL:-http://localhost:8001}
       DEEPWIKI_EMBEDDER_TYPE: ollama
       OLLAMA_HOST: http://ollama:11434
     ports:
-      - "127.0.0.1:8001:8001"   # API
-      - "127.0.0.1:3001:3000"   # UI (3000 is Grafana on z8g4)
+      - "8001:8001"   # API
+      - "3001:3000"   # UI (3000 is Grafana on z8g4)
     volumes:
       - deepwiki_data:/root/.adalflow
       - ./:/app/local-repos/aibrarian:ro
@@ -199,7 +199,7 @@ services:
     restart: unless-stopped
     environment:
       QUICK_CONNECT_MG_HOST: memgraph
-    ports: ["127.0.0.1:3002:3000"]
+    ports: ["3002:3000"]
     depends_on: [memgraph]
 
   codegraph-index:
@@ -230,7 +230,7 @@ services:
     command: ["mcp-server", "--transport", "http", "--host", "0.0.0.0", "--port", "8080"]
     environment: *cgr-env
     volumes: ["./:/repo:ro"]
-    ports: ["127.0.0.1:8085:8080"]
+    ports: ["8085:8080"]
     restart: unless-stopped
     depends_on: [memgraph]
 
