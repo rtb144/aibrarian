@@ -86,8 +86,9 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
                 conn.execute("SELECT 1")
         except Exception as exc:
             raise HTTPException(503, f"database unreachable: {exc}") from exc
+        jf = ctx_.jellyfin.check()
         return {"status": "ok", "version": __version__, "qdrant": ctx_.vectors.ping(),
-                "ollama": ctx_.ollama.ping(), "jellyfin": ctx_.jellyfin.ping()}
+                "ollama": ctx_.ollama.ping(), "jellyfin": jf == "ok", "jellyfin_status": jf}
 
     @app.get("/metrics")
     def metrics() -> Response:

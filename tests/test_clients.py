@@ -74,12 +74,40 @@ def test_vector_store_contract():
 
 def test_jellyfin_search_handles_errors():
     def h(req):
-        assert req.headers["X-Emby-Token"] == "k"
+        assert req.headers["Authorization"].endswith('Token="k"')
         return httpx.Response(500)
 
     jf = JellyfinClient("http://j", "k", client=mock(h, "http://j"))
-    jf.http.headers["X-Emby-Token"] = "k"
     assert jf.search("Alien") == [] and jf.search("") == []
+
+
+def test_jellyfin_auth_header_and_no_query_key():
+    from aibrarian import __version__
+
+    seen = []
+
+    def h(req):
+        seen.append(req)
+        assert "api_key" not in str(req.url) and "X-Emby-Token" not in req.headers
+        ok = req.headers.get("Authorization", "").endswith('Token="k"')
+        if req.url.path == "/Items":
+            return httpx.Response(200 if ok else 401, json={"Items": [{"Name": "Alien"}]})
+        return httpx.Response(200 if ok else 401, json={})
+
+    jf = JellyfinClient("http://j", "k", client=mock(h, "http://j"))
+    assert jf.search("Alien") == [{"Name": "Alien"}]
+    assert jf.check() == "ok" and jf.ping() and seen[-1].url.path == "/System/Info"
+    assert seen[0].headers["Authorization"] == (
+        'MediaBrowser Client="aibrarian", Device="aibrarian", DeviceId="aibrarian", '
+        f'Version="{__version__}", Token="k"')
+    bad = JellyfinClient("http://j", "wrong", client=mock(h, "http://j"))
+    assert bad.check() == "unauthorized" and not bad.ping() and bad.search("Alien") == []
+    assert JellyfinClient("http://j", "", client=mock(h, "http://j")).check() == "no_api_key"
+
+    def down(req):
+        raise httpx.ConnectError("nope")
+
+    assert JellyfinClient("http://j", "k", client=mock(down, "http://j")).check() == "unreachable"
 
 
 def test_json_formatter():
@@ -89,3 +117,23 @@ def test_json_formatter():
                                  "name": "t", "media_id": 4})
     out = json.loads(JsonFormatter("svc").format(rec))
     assert out["msg"] == "hi x" and out["media_id"] == 4 and out["service"] == "svc"
+
+
+def test_health_reports_jellyfin_auth(ctx):
+    from contextlib import contextmanager
+
+    from fastapi.testclient import TestClient
+
+    from aibrarian.api import create_app
+
+    class DB:
+        @contextmanager
+        def conn(self):
+            yield type("C", (), {"execute": lambda self, q: None})()
+
+    ctx.db = DB()
+    ctx.vectors.ping = lambda: True
+    ctx.ollama.ping = lambda: True
+    ctx.jellyfin.check = lambda: "unauthorized"
+    body = TestClient(create_app(ctx, migrate=False)).get("/health").json()
+    assert body["jellyfin"] is False and body["jellyfin_status"] == "unauthorized"

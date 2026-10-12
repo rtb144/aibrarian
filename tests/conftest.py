@@ -93,6 +93,9 @@ class FakeOllama:
     def ping(self):
         return True
 
+    def check(self):
+        return "ok"
+
 
 class FakeVectors:
     def __init__(self) -> None:
