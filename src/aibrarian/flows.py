@@ -133,6 +133,14 @@ def reprobe_flow(only_missing: bool = True, limit: int | None = None) -> dict:
     return reprobe_all(ctx(), only_missing, limit)
 
 
+@flow(name="duplicates")
+def duplicates_flow(exact_only: bool = False) -> dict:
+    """Read-only duplicates report (writes report_dir/duplicates.json)."""
+    from .services import duplicates_report
+
+    return duplicates_report(ctx(), exact_only)["summary"]
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -164,6 +172,7 @@ def deployments(group: str) -> list:
            book_scan_flow.to_deployment("book-scan", cron="30 * * * *", **one),
            retry_failed_flow.to_deployment("retry-failed", **one),
            reprobe_flow.to_deployment("reprobe", **one),
+           duplicates_flow.to_deployment("duplicates", cron="0 4 * * 0", **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]
 

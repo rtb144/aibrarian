@@ -98,3 +98,18 @@ apply in name order, each once, and are recorded in `aib.schema_migrations`.
   Jellyfin is asked to rescan.
 - API: `POST /suggestions/{id}/apply` (dry-run unless `dry_run=false`),
   `POST /suggestions/{id}/reject`. CLI: `aibrarian reject --id N`.
+
+## Duplicates report (read-only)
+
+`aibrarian duplicates [--exact-only] [--tsv]`, `GET /duplicates` (`?cached=true` for the
+last saved report, `?exact_only=true`), page `/duplicates/ui`, Prefect deployment
+`duplicates` (Sundays 04:00). Nothing is ever deleted or moved.
+
+- **identical**: same size → same head+tail sample → same full sha256. The catalog
+  fingerprint mixes in mtime so it can't be used; content hashes are cached in
+  `aib.file_hash` (path+size+mtime), so re-runs only hash new/changed candidates.
+- **review**: same normalized title+year, or duration within 2 s when files share a
+  folder or have similar titles. Compare codec/resolution/size/audio/subs side by side.
+- `suggested_keep` prefers `Title (Year)/Title (Year).ext`, then resolution, bitrate,
+  stream counts, sidecars. `sidecars_only_on_others` lists subtitles etc. that exist only
+  next to a non-kept copy, with the name they would get next to the kept file.

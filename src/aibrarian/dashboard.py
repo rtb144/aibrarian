@@ -17,6 +17,7 @@ DASHBOARD_HTML = """<!doctype html>
 <h1>aibrarian &middot; media pipeline</h1>
 <div id="summary" class="muted">loading&hellip;</div>
 <div class="cards" id="stages"></div>
+<p><a href="search/ui">Quote search</a> · <a href="duplicates/ui">Duplicates report</a></p>
 <h2>Audio layouts</h2><div class="cards" id="layouts"></div>
 <h2 id="listTitle">Failures</h2><table id="list"></table>
 <h2>Timeline <span id="tlTitle" class="muted"></span></h2><table id="timeline"></table>
@@ -122,4 +123,44 @@ document.getElementById("f").onsubmit=async e=>{e.preventDefault();
    body:JSON.stringify({phrase:h.text,movie_id:h.media_id})});const c=await r.json();
   if(r.ok){b.textContent="done";M.className="msg ok";M.textContent=`Clip ${ts(c.start)}-${ts(c.end)}: ${c.output}`}
   else{b.disabled=false;b.textContent="Make clip";err(c)}});};
+</script></body></html>"""
+
+
+DUPLICATES_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian duplicates</title><style>
+body{font-family:system-ui,sans-serif;margin:1.5rem}
+.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{border:1px solid #ccc;border-radius:6px;padding:.6rem 1rem}
+.card b{display:block;font-size:1.4rem}table{border-collapse:collapse;width:100%;margin:.4rem 0 1.2rem}
+td,th{border-bottom:1px solid #ddd;padding:.25rem .4rem;text-align:left;font-size:.9rem}
+tr.keep{background:#eaffea}.grp{margin-top:1rem;font-weight:600}.warn{color:#a60}
+</style></head><body>
+<h1>Duplicates (read-only)</h1>
+<p><a href="../dashboard">dashboard</a> · Nothing is deleted or moved. "keep" is a suggestion only.
+<button onclick="load(false)">Re-scan now</button> <label><input type="checkbox" id="exact"> identical only</label></p>
+<div class="cards" id="sum">loading...</div><div id="out"></div>
+<script>
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const gb=b=>(b/1e9).toFixed(2)+" GB";
+function section(title,groups){
+ if(!groups.length)return `<h2>${title}</h2><p>none</p>`;
+ return `<h2>${title}</h2>`+groups.map((g,i)=>`<div class="grp">#${i+1} ${esc(g.reason)} - keep: ${esc(g.suggested_keep)}
+ (${esc(g.keep_reason)}) - frees ${gb(g.reclaimable_bytes)}</div>`+
+ (g.sidecars_only_on_others.length?`<div class="warn">Sidecars only on other copies: `+
+   g.sidecars_only_on_others.map(o=>esc(o.sidecar)).join(", ")+`</div>`:"")+
+ `<table><tr><th></th><th>path</th><th>size</th><th>container</th><th>video</th><th>res</th><th>HDR</th>`+
+ `<th>audio</th><th>#aud</th><th>#subs</th><th>sidecars</th><th>stage</th></tr>`+
+ g.copies.map(c=>`<tr class="${c.path===g.suggested_keep?"keep":""}"><td>${c.path===g.suggested_keep?"KEEP":""}</td>`+
+  `<td>${esc(c.path)}</td><td>${gb(c.size_bytes)}</td><td>${esc(c.container)}</td><td>${esc(c.video_codec)}</td>`+
+  `<td>${c.width?c.width+"x"+c.height:""}</td><td>${esc(c.hdr)}</td><td>${esc(c.audio_layout)}</td>`+
+  `<td>${c.audio_streams}</td><td>${c.subtitle_streams}</td><td>${esc(c.sidecars.join(" "))}</td><td>${esc(c.stage)}</td></tr>`).join("")+
+ `</table>`).join("");}
+async function load(cached){
+ document.getElementById("sum").textContent="scanning (first run hashes candidate files)...";
+ const p=new URLSearchParams({cached:String(cached),exact_only:String(document.getElementById("exact").checked)});
+ const r=await (await fetch("../duplicates?"+p)).json(),s=r.summary;
+ document.getElementById("sum").innerHTML=[["identical groups",s.identical_groups],["identical savings",gb(s.identical_reclaimable_bytes)],
+  ["review groups",s.review_groups],["review (if all extra copies removed)",gb(s.review_reclaimable_bytes)],["files",s.files_scanned]]
+  .map(([k,v])=>`<div class="card"><b>${v}</b>${k}</div>`).join("");
+ document.getElementById("out").innerHTML=section("Identical (byte-for-byte)",r.identical)+section("Likely duplicates - review",r.review);}
+load(true);
 </script></body></html>"""

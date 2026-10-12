@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from . import __version__, services
 from .actions import Context, RetryableError, run_action
 from .config import get_settings
-from .dashboard import DASHBOARD_HTML, SEARCH_UI_HTML
+from .dashboard import DASHBOARD_HTML, DUPLICATES_UI_HTML, SEARCH_UI_HTML
 from .metrics import SUGGESTIONS_OPEN, refresh_stage_gauges
 from .status import ACTIONS, Stage
 from .titles import TitleNotResolved
@@ -249,6 +249,21 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
     def autocomplete(q: str = "", limit: int = Query(10, ge=1, le=50)):
         """Only searchable (transcribed) titles; prefix + fuzzy."""
         return services.autocomplete_titles(c(), q, limit)
+
+    @app.get("/duplicates")
+    def duplicates(exact_only: bool = False, cached: bool = False,
+                   duration_tol: float = Query(2.0, ge=0, le=60)):
+        """Read-only report. ``cached=true`` returns the last saved report instantly."""
+        import json
+
+        f = c().settings.report_dir / "duplicates.json"
+        if cached and f.exists():
+            return json.loads(f.read_text())
+        return services.duplicates_report(c(), exact_only, duration_tol)
+
+    @app.get("/duplicates/ui", response_class=HTMLResponse)
+    def duplicates_ui() -> str:
+        return DUPLICATES_UI_HTML
 
     @app.get("/search/ui", response_class=HTMLResponse)
     def search_ui() -> str:

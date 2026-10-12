@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("--include-noop", action="store_true")
     sg.add_argument("--tsv", action="store_true", help="tab-separated table")
 
+    dp = sub.add_parser("duplicates", help="read-only duplicates report (never deletes)")
+    dp.add_argument("--exact-only", action="store_true")
+    dp.add_argument("--tsv", action="store_true")
+    dp.add_argument("--duration-tol", type=float, default=2.0)
+
     rj = sub.add_parser("reject", help="dismiss suggestions by id")
     rj.add_argument("--id", type=int, action="append", required=True)
 
@@ -242,6 +247,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
                 print("\t".join("" if r[k] is None else str(r[k]) for k in cols))
         else:
             _print(rows)
+    elif cmd == "duplicates":
+        from .duplicates import to_tsv
+
+        rep = services.duplicates_report(ctx, args.exact_only, args.duration_tol)
+        if args.tsv:
+            print(to_tsv(rep), end="")
+        else:
+            _print(rep)
     elif cmd == "reject":
         _print([services.reject_suggestion(ctx, i) for i in args.id])
     elif cmd == "apply":

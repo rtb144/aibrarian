@@ -237,3 +237,20 @@ def pipeline_status(ctx: Context) -> dict[str, Any]:
     return {"stages": counts, "backlog": backlog,
             "audio_layouts": ctx.db.audio_layout_counts(),
             "eta": estimate(ctx.db.completion_times("transcribe"), backlog)}
+
+
+def duplicates_report(ctx: Context, exact_only: bool = False,
+                      duration_tol: float = 2.0) -> dict[str, Any]:
+    """Read-only; see duplicates.py. Result also cached to report_dir/duplicates.json."""
+    import json
+
+    from . import duplicates
+
+    rep = duplicates.report(ctx.db.duplicate_candidates(), duplicates.HashCache(ctx.db),
+                            exact_only, duration_tol)
+    try:
+        ctx.settings.report_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.settings.report_dir / "duplicates.json").write_text(json.dumps(rep, default=str))
+    except OSError:
+        pass
+    return rep

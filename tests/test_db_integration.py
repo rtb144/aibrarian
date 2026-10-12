@@ -23,7 +23,7 @@ def db():
     with d.conn() as c:
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
-    assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop"]
+    assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop", "004_file_hash"]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -163,3 +163,12 @@ def test_noop_suggestions_hidden(db):
     assert db.get_suggestion(b)["status"] == "noop" and "/m/b.mkv" in db.suggestion_sources("video")
     mid = db.upsert_media([mf("/m/a.mkv")])[0]["id"]
     assert db.update_path("/m/a.mkv", "/m/A/a.mkv") == mid and db.update_path("/nope", "/x") is None
+
+
+def test_file_hash_cache_and_candidates(db):
+    db.upsert_media([mf("/m/01-movies/d.mkv")])
+    assert db.duplicate_candidates()[0]["path"] == "/m/01-movies/d.mkv"
+    assert db.get_file_hash("/p") is None
+    db.put_file_hash("/p", 10, 1.5, "s", None)
+    db.put_file_hash("/p", 10, 1.5, "s", "h")
+    assert db.get_file_hash("/p")["sha256"] == "h"

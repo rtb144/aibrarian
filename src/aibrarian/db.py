@@ -155,6 +155,28 @@ class Database:
                 (title, title, f"%{title}%", limit),
             ).fetchall()
 
+    def duplicate_candidates(self) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT id, path, size_bytes, mtime, title, year, duration_s, media_info, "
+                "audio_layout, stage FROM aib.media_file WHERE NOT missing AND kind='video' "
+                "ORDER BY id").fetchall()
+
+    def get_file_hash(self, path: str) -> dict[str, Any] | None:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.file_hash WHERE path=%s", (path,)).fetchone()
+
+    def put_file_hash(self, path: str, size: int, mtime: float, sample: str | None,
+                      sha256: str | None) -> None:
+        with self.conn() as c:
+            c.execute(
+                """INSERT INTO aib.file_hash (path, size_bytes, mtime, sample, sha256)
+                   VALUES (%s,%s,%s,%s,%s) ON CONFLICT (path) DO UPDATE SET
+                   size_bytes=EXCLUDED.size_bytes, mtime=EXCLUDED.mtime, sample=EXCLUDED.sample,
+                   sha256=EXCLUDED.sha256, computed_at=now()""",
+                (path, size, mtime, sample, sha256))
+            c.commit()
+
     def searchable_titles(self) -> list[dict[str, Any]]:
         """Media that have transcript segments (what search/clip can actually hit)."""
         with self.conn() as c:
