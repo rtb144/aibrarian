@@ -187,7 +187,7 @@ you go (edit this file, or copy it into Obsidian).
   after `QUARANTINE_RETENTION_DAYS` (30). Watch `/dedup/ui`.
   Done when: a week's runs show `quarantine` rows and no `error` rows.
 
-- [ ] **5.4d Automatic book librarian.**
+- [x] **5.4d Automatic book librarian.** (Calibre ingest via calibredb, evidence scoring, title cleaning, audiobook copy+verify, `calibre-validate`.)
   Do: `dc exec aibrarian-api aibrarian books autoapply --limit 10` (dry run: confidence and
   PASS/below 0.90 per book), then `--limit 10 --execute`, check `/library-log/ui`, undo one with
   `aibrarian books undo --id N` (dry run, then `--execute`). Then let `book-autoapply`

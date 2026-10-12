@@ -302,6 +302,11 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
                                     until=until, title=title, author=author, series=series,
                                     run_id=run_id, limit=limit, offset=offset)
 
+    @app.get("/library-log/validation")
+    def library_validation():
+        """Latest calibre-validate result (read-only)."""
+        return services.latest_validation(c()) or {}
+
     @app.get("/library-log/facets")
     def library_facets(field: str = Query(..., pattern="^(title|author|series)$"), q: str = "",
                        limit: int = Query(20, ge=1, le=100)):

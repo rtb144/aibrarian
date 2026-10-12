@@ -125,7 +125,8 @@ def google_books(title: str | None, author: str | None, isbn: str | None,
     v = items[0].get("volumeInfo", {})
     return {"title": v.get("title"), "author": (v.get("authors") or [None])[0],
             "year": int(v["publishedDate"][:4]) if v.get("publishedDate", "")[:4].isdigit()
-            else None, "source": "google_books"}
+            else None, "source": "google_books", "match_type": "isbn" if isbn else "title",
+            "isbn": isbn}
 
 
 def reconcile(meta: dict[str, Any], ref: dict[str, Any] | None) -> float:
@@ -200,8 +201,15 @@ def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
         cls = classify(ollama, path, {**meta, "reference": ref})
         if ref_score:
             cls["confidence"] = round(max(cls["confidence"], (cls["confidence"] + ref_score) / 2), 3)
-    dst = destination(cls["kind"], cls.get("title"), cls.get("author"), cls.get("series"),
-                      path, s)
+    # confidence is evidence-based (bookmeta.score), not the LLM's self-rating
+    from .bookmeta import evaluate
+
+    ev = evaluate({"source_path": str(path), "media_kind": cls["kind"],
+                   "metadata": {"embedded": meta, "reference": ref, "classification": cls}})
+    cls["llm_confidence"] = cls.get("confidence")
+    cls["confidence"] = ev["confidence"]
+    dst = destination(cls["kind"], ev["title"] or cls.get("title"), ev["author"],
+                      ev["series"], path, s)
     conf = cls["confidence"] if dst else min(cls["confidence"], s.book_review_confidence - 0.01)
     return Suggestion(domain="book", source_path=str(path), target_path=str(dst) if dst else None,
                       metadata={"embedded": meta, "reference": ref, "classification": cls},

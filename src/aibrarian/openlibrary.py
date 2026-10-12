@@ -151,5 +151,7 @@ def make_ol_lookup(db):
             return None
         h = hits[0]
         return {"title": h["title"], "author": (h["authors"] or [None])[0],
-                "year": h["publish_year"], "source": "openlibrary", "key": h["key"]}
+                "year": h["publish_year"], "source": "openlibrary", "key": h["key"],
+                "match_type": h.get("match_type"), "isbn13": h.get("isbn13"),
+                "isbn10": h.get("isbn10")}
     return _lookup

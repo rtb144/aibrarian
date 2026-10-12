@@ -81,6 +81,7 @@ def test_book_catalog_high_confidence_ref(tmp_path, settings):
     ref = {"title": "Dune", "author": "Frank Herbert", "source": "openlibrary"}
     s = books.catalog_file(p, settings, FakeOllama(), ol_lookup=lambda *a: ref)
     assert s.decision == "suggest" and s.media_kind == "ebook"
+    assert s.confidence == 0.95          # embedded title+author agree 100 % with the reference
     assert s.target_path == str(settings.calibre_dir / "Frank Herbert" / "Dune" / "dune.epub")
 
 
@@ -92,7 +93,9 @@ def test_book_catalog_auto_mode_and_llm(tmp_path, settings):
                       "year": None, "confidence": 0.9, "notes": "m4b"})
     s = books.catalog_file(p, settings, llm, ol_lookup=lambda *a: None,
                            gb_lookup=lambda *a: None)
-    assert s.decision == "auto"
+    # LLM-only metadata is weak evidence now: 0.35, whatever the LLM claims (0.9)
+    assert s.confidence == 0.35 and s.decision == "reject"
+    assert s.metadata["classification"]["llm_confidence"] == 0.9
     assert s.target_path.endswith("audiobooks/Auth/S/Book/book.m4b")
 
 

@@ -229,23 +229,44 @@ Per open book suggestion, oldest first, up to `BOOK_AUTO_BATCH_LIMIT` (default 5
 
 | Situation | Result |
 |---|---|
-| confidence < `BOOK_AUTO_MIN_CONFIDENCE` (default **0.90**, 0-1 scale) | `needs_review`, file untouched |
-| source missing | `skip` (suggestion `failed`) |
-| source not under `/media`, or target outside Calibre/Audiobookshelf roots | `needs_review` |
-| target exists, byte-identical (size + sha256) | incoming copy **quarantined** (same `QUARANTINE_DIR`, manifest, 30-day purge as video) |
-| target exists, different | `needs_review` (never overwrite) |
-| target on another filesystem / mount (`EXDEV`) | `needs_review` (never copy) |
-| otherwise | `os.rename` to the target (`move` or `rename`) with sidecars |
+| evidence score < `BOOK_AUTO_MIN_CONFIDENCE` (default **0.90**) | `needs_review`, file untouched |
+| source missing | `skip` |
+| ebook, sha256 equals an existing Calibre format | source **quarantined** (manifest, 30-day purge) |
+| ebook, same title+author (or ISBN) already in Calibre, format missing | `add_format` (`calibredb add_format --dont-replace`) |
+| ebook, same book and format already present but different bytes | `needs_review` |
+| ebook, new | `calibre_add`: `calibredb add --library-path /books --automerge=ignore --title --authors --series --series-index --isbn --tags`, then source quarantined |
+| calibredb fails / prints no book id | `error` + suggestion `needs_review`, **source untouched** |
+| audiobook | moved to `/audiobookshelf/Author/[Series/][idx - ]Title/`; across mounts: copy → fsync → sha256 verify → source quarantined (`copy`) |
+| target exists | identical → quarantine, different → `needs_review` (never overwrite) |
 
-Sidecars that travel with a book: same-stem files (`Book.opf`, `Book.jpg`, `Book.nfo` …) and,
-when the folder holds just that one book, `cover.jpg/png`, `metadata.opf`, `folder.jpg`,
-`desc.txt`, `reader.txt`. Nothing is overwritten (a clashing sidecar → `needs_review`).
-The emptied source folder is removed with the same rules as `duplicates cleanup-empty`
-(leftover junk quarantined, library roots never removed).
+calibredb runs under an fcntl lock (`/data/reports/.calibre.lock`) and retries with backoff
+on "database is locked" (Calibre-Web holds its own locks). Full stdout/stderr/exit code and
+the new book id go to `details` in `aib.library_action` and the JSONL log, expandable on
+`/library-log/ui`. The Calibre DB is never written directly. The image ships calibre
+`CALIBRE_VERSION` (build arg, 9.16.0) — keep it ≥ the Calibre-Web copy
+(`docker exec calibre-web calibredb --version`); container runs as uid 1000 like Calibre-Web.
 
-> Note: `/media`, `/books` and `/audiobookshelf` are separate bind mounts in the containers,
-> so a move between them is a cross-mount rename and ends in `needs_review` ("another
-> filesystem"). Only moves within one mount are applied automatically.
+### Evidence score
+
+| Evidence | Score |
+|---|---|
+| ISBN lookup hit, title agrees | 0.97 |
+| ISBN hit, title differs | 0.85 |
+| embedded title + author, reference match | 0.50 + 0.45 × min(title%, author%) |
+| embedded title + author, no reference | 0.70 |
+| embedded title only, reference | 0.40 + 0.30 × title% |
+| filename / LLM guess only | 0.35 (+0.20 × title%) |
+| junk title (hash, `unknown`, digits) | 0.10 |
+| no author | capped at 0.30 |
+
+Old suggestions are re-scored at apply time; no rescan needed.
+
+### Title cleaning
+
+`Dark Fortune: A Cozy Mystery (Fortunes, Love Book 6)` → title *Dark Fortune*, series
+*Fortunes, Love* #6, subtitle *A Cozy Mystery*. Series/book markers (`Book 1`, `#3`,
+`(Series 2)`) are split out, genre subtitles move to the subtitle, `" : "` is normalised;
+non-genre subtitles stay (`Star Wars: Thrawn`).
 
 ```bash
 dc exec aibrarian-api aibrarian books autoapply --limit 10            # dry run: confidence, PASS/below, decision
@@ -254,7 +275,7 @@ dc exec aibrarian-api aibrarian books undo --id 42                    # dry run
 dc exec aibrarian-api aibrarian books undo --run books-20261012T095000Z --execute
 ```
 
-The dry run prints one line per suggestion on stderr (`[k/n] 0.93 PASS 0.90 -> apply <path>`)
+The dry run prints one line per suggestion on stderr (score, PASS/below, cleaned title/author/series, decision and the planned calibredb command)
 and a table on stdout (`id, confidence, passes, decision, title, author, source, target, reason`).
 `--json` gives the full plan.
 
@@ -284,3 +305,14 @@ undo) and to `/data/reports/library-actions.log` (JSONL, outside the quarantine,
   read-only, "show command" prints the undo CLI). Linked from `/dashboard` and `/dedup/ui`.
 - JSON: `GET /library-log?action=&domain=&since=&until=&title=&author=&series=&run_id=&limit=&offset=`,
   `GET /library-log/facets?field=author&q=her`.
+
+### Calibre validation (`calibre-validate`)
+
+Daily 05:41 UTC (concurrency 1) or `aibrarian books validate` (exit 1 on issues). Read-only:
+sqlite `PRAGMA integrity_check` on a `mode=ro` connection, every logged ingest (book id still
+present, file present, sha256 unchanged), formats missing on disk, orphan files in the
+library. `calibredb check_library` is *not* used because it VACUUMs the DB. The result is a
+`validate` action, shown on `/library-log/ui`, `/dashboard` and `GET /library-log/validation`.
+
+Undo: `calibre_add` → source restored, then `calibredb remove`; `add_format` →
+`remove_format`; `copy` → source restored, the copy moved to `<root>/.aibrarian-trash/<date>/`.

@@ -116,6 +116,7 @@ class Settings(BaseSettings):
         True, validation_alias=_env("book_auto_apply_enabled", "BOOK_AUTO_APPLY_ENABLED"))
     book_auto_batch_limit: int = Field(  # suggestions per run; 0 = unlimited
         50, validation_alias=_env("book_auto_batch_limit", "BOOK_AUTO_BATCH_LIMIT"))
+    calibredb_bin: str = Field("calibredb", validation_alias=_env("calibredb_bin", "CALIBREDB"))
     book_auto_min_confidence: float = Field(
         0.90, validation_alias=_env("book_auto_min_confidence", "BOOK_AUTO_MIN_CONFIDENCE"))
     video_min_confidence: float = 0.85  # auto-catalog Jellyfin match threshold

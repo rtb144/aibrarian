@@ -185,6 +185,16 @@ def book_autoapply_flow(limit: int | None = None) -> dict:
     return {k: v for k, v in res.items() if k != "items"}
 
 
+@flow(name="calibre-validate", log_prints=True)
+def calibre_validate_flow() -> dict:
+    """Read-only Calibre consistency check (never writes metadata.db)."""
+    from aibrarian.services import books_validate
+
+    res = books_validate(ctx(), progress=log.info, source=f"prefect:{_run_ids()[0]}")
+    return {"ok": res["ok"], "books": res.get("books"), "issue_count": res.get("issue_count"),
+            "integrity": res.get("integrity")}
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -219,6 +229,7 @@ def deployments(group: str) -> list:
            duplicates_flow.to_deployment("duplicates", cron="0 4 * * 0", **one),
            dedup_quarantine_flow.to_deployment("dedup-quarantine", cron="0 5 * * 0", **one),
            book_autoapply_flow.to_deployment("book-autoapply", cron="50 * * * *", **one),
+           calibre_validate_flow.to_deployment("calibre-validate", cron="41 5 * * *", **one),
            quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]

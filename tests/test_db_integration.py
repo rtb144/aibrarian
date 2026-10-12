@@ -24,7 +24,8 @@ def db():
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
     assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop", "004_file_hash",
-                           "005_purged", "006_dedup_action", "007_library_action"]
+                           "005_purged", "006_dedup_action", "007_library_action",
+                           "008_calibre_actions"]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -231,3 +232,6 @@ def test_library_action_log_and_statuses(db):
     assert db.library_actions(since="2030-01-01")[1] == 0
     assert db.library_action_counts() == {"move": 1, "needs_review": 1, "undo": 1}
     assert db.library_facet("author", "her") == ["Frank Herbert"]
+    for act in ("calibre_add", "add_format", "copy", "validate"):
+        db.record_library_action({"action": act, "details": {"calibre": {"exit_code": 0}}})
+    assert db.library_actions(action="validate")[0][0]["details"]["calibre"]["exit_code"] == 0

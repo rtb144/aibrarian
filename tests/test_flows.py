@@ -9,9 +9,11 @@ def test_scheduled_deployments_cannot_overlap():
     deps = {d.name: d for d in flows.deployments("all")}
     assert set(deps) == {"media-pipeline", "stage", "discover", "library-scan", "book-scan",
                          "retry-failed", "openlibrary-import", "reprobe", "duplicates",
-                         "dedup-quarantine", "quarantine-purge", "book-autoapply"}
+                         "dedup-quarantine", "quarantine-purge", "book-autoapply",
+                         "calibre-validate"}
     for name in ("media-pipeline", "discover", "library-scan", "book-scan",
-                 "dedup-quarantine", "quarantine-purge", "book-autoapply"):
+                 "dedup-quarantine", "quarantine-purge", "book-autoapply",
+                 "calibre-validate"):
         cl = deps[name].concurrency_limit
         limit = getattr(cl, "limit", cl)
         strategy = (getattr(cl, "collision_strategy", None)
@@ -19,9 +21,11 @@ def test_scheduled_deployments_cannot_overlap():
         assert limit == 1 and strategy == ConcurrencyLimitStrategy.CANCEL_NEW, name
     assert deps["discover"].schedules  # discover has its own schedule
     crons = {n: deps[n].schedules[0].schedule.cron for n in
-             ("duplicates", "dedup-quarantine", "quarantine-purge", "book-autoapply")}
+             ("duplicates", "dedup-quarantine", "quarantine-purge", "book-autoapply",
+              "calibre-validate")}
     assert crons == {"duplicates": "0 4 * * 0", "dedup-quarantine": "0 5 * * 0",
-                     "quarantine-purge": "37 4 * * *", "book-autoapply": "50 * * * *"}
+                     "quarantine-purge": "37 4 * * *", "book-autoapply": "50 * * * *",
+                     "calibre-validate": "41 5 * * *"}
 
 
 def test_dedup_quarantine_can_be_disabled(monkeypatch):
@@ -66,7 +70,8 @@ def test_flows_importable_as_script(tmp_path):
     for name, flow_name in (("book_autoapply_flow", "book-autoapply"),
                             ("dedup_quarantine_flow", "dedup-quarantine"),
                             ("quarantine_purge_flow", "quarantine-purge"),
-                            ("book_scan_flow", "book-scan")):
+                            ("book_scan_flow", "book-scan"),
+                            ("calibre_validate_flow", "calibre-validate")):
         code = ("from prefect.flows import load_flow_from_entrypoint as l;"
                 f"print(l('{f}:{name}').name)")
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,

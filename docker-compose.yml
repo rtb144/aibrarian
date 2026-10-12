@@ -27,6 +27,7 @@ x-aib-env: &aib-env
   AIB_BOOK_AUTO_APPLY_ENABLED: ${BOOK_AUTO_APPLY_ENABLED:-true}
   AIB_BOOK_AUTO_BATCH_LIMIT: ${BOOK_AUTO_BATCH_LIMIT:-50}
   AIB_BOOK_AUTO_MIN_CONFIDENCE: ${BOOK_AUTO_MIN_CONFIDENCE:-0.90}
+  AIB_CALIBREDB: ${CALIBREDB:-calibredb}
   AIB_BOOK_MODE: ${AIB_BOOK_MODE:-suggest}
   AIB_BOOK_MIN_CONFIDENCE: ${AIB_BOOK_MIN_CONFIDENCE:-0.85}
   AIB_BOOK_REVIEW_CONFIDENCE: ${AIB_BOOK_REVIEW_CONFIDENCE:-0.60}
@@ -37,7 +38,7 @@ x-aib-env: &aib-env
 
 x-media-volumes: &media-volumes
   - ${MEDIA_HOST_ROOT:-/opt/jellyfin/media}:/media
-  - ${CALIBRE_HOST_DIR:-/opt/calibre/books}:/books
+  - ${CALIBRE_HOST_DIR:-/opt/calibre/books}:/books   # Calibre library (metadata.db), rw, uid 1000 like calibre-web
   - ${ABS_HOST_ROOT:-/opt/audiobookshelf}:/audiobookshelf
   - ${AIB_DATA_HOST_DIR:-/opt/stacks/aibrarian/data}:/data
   - ${OPENLIBRARY_HOST_DIR:-/opt/stacks/ai/openlibrary}:/data/openlibrary:ro

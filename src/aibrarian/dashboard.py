@@ -18,6 +18,7 @@ DASHBOARD_HTML = """<!doctype html>
 <div id="summary" class="muted">loading&hellip;</div>
 <div class="cards" id="stages"></div>
 <p><a href="search/ui">Quote search</a> · <a href="duplicates/ui">Duplicates report</a> · <a href="dedup/ui">Dedup actions</a> · <a href="library-log/ui">Library log (books)</a></p>
+<p id="calval" class="muted"></p>
 <h2>Audio layouts</h2><div class="cards" id="layouts"></div>
 <h2 id="listTitle">Failures</h2><table id="list"></table>
 <h2>Timeline <span id="tlTitle" class="muted"></span></h2><table id="timeline"></table>
@@ -29,6 +30,10 @@ const esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt
 const j=u=>fetch(u).then(r=>r.json());
 function fmt(s){if(s==null)return"unknown";s=Math.round(s);const d=Math.floor(s/86400),
  h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return(d?d+"d ":"")+h+"h "+m+"m";}
+async function loadCalibre(){try{const v=await j("library-log/validation");if(!v.id)return;
+ const ok=(v.details||{}).ok;document.getElementById("calval").innerHTML=
+ `Calibre validation ${esc(String(v.ts).slice(0,16))}: <b style="color:${ok?"#6c6":"#f66"}">${ok?"OK":"ISSUES"}</b> - ${esc(v.reason)} (<a href="library-log/ui?action=validate">details</a>)`;}catch(e){}}
+loadCalibre();
 async function loadStatus(){
  const st=await j("status");
  document.getElementById("summary").textContent=
@@ -241,10 +246,11 @@ Automatic book renames/moves/quarantines. Nothing here changes files; "undo" sho
 <input id="series" list="l-series" placeholder="series"><datalist id="l-series"></datalist>
 <select id="action"><option value="">all actions</option><option>move</option><option>rename</option>
 <option>quarantine</option><option>needs_review</option><option>skip</option><option>error</option>
-<option>undo</option><option>folder_removed</option></select>
+<option>undo</option><option>folder_removed</option><option>calibre_add</option>
+<option>add_format</option><option>copy</option><option>validate</option></select>
 <select id="domain"><option value="">all domains</option><option>book</option><option>video</option></select>
 <input id="run" placeholder="run id"> <button>Filter</button></form>
-<p id="undo"></p><div id="out"></div><p id="pg"></p>
+<div id="val"></div><p id="undo"></p><div id="out"></div><p id="pg"></p>
 <script>
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const N=50,$=id=>document.getElementById(id);
@@ -261,15 +267,20 @@ async function go(off){
  for(const k of ["title","author","series","action","domain"])if($(k).value)p.set(k,$(k).value);
  if($("run").value)p.set("run_id",$("run").value);
  const r=await (await fetch("../library-log?"+p)).json();
+ const v=r.summary.validation;
+ if(v&&v.id){const d=v.details||{},iss=d.issues||{};$("val").innerHTML=`<h3>Latest Calibre validation: <span style="color:${d.ok?"#080":"#c00"}">${d.ok?"OK":"issues"}</span></h3>`+
+  `<p>${esc(String(v.ts).slice(0,19))} - ${esc(v.reason)}</p>`+Object.entries(iss).filter(([k,x])=>x.length).map(([k,x])=>
+  `<details><summary>${esc(k)} (${x.length})</summary><pre>${esc(JSON.stringify(x.slice(0,200),null,1))}</pre></details>`).join("");}
  $("today").innerHTML=cards(r.summary.today);$("total").innerHTML=cards(r.summary.total)+
   `<div class="card"><b>${r.summary.threshold}</b>auto threshold${r.summary.auto_enabled?"":" (auto OFF)"}</div>`;
  $("out").innerHTML=r.actions.length?`<table><tr><th>time (UTC)</th><th>action</th><th>title</th><th>author</th><th>series</th>`+
   `<th>conf.</th><th>from</th><th>to</th><th>reason</th><th>run</th><th>undo</th></tr>`+r.actions.map(a=>{
-  const can=["move","rename","quarantine"].includes(a.action)&&!a.undone_by;
+  const can=["move","rename","copy","quarantine","calibre_add","add_format"].includes(a.action)&&!a.undone_by;
+  const det=a.details&&Object.keys(a.details).length?`<details><summary>details</summary><pre>${esc(JSON.stringify(a.details,null,1))}</pre></details>`:"";
   return `<tr><td>${esc(a.ts).slice(0,19)}</td><td class="a-${esc(a.action)}">${esc(a.action)}${a.undone_by?" (undone)":""}</td>`+
   `<td>${esc(a.title)}</td><td>${esc(a.author)}</td><td>${esc(a.series)}${a.series_index?" #"+esc(a.series_index):""}</td>`+
   `<td>${a.confidence==null?"":Number(a.confidence).toFixed(2)}</td><td>${esc(a.old_path)}</td><td>${esc(a.new_path)}</td>`+
-  `<td>${esc(a.reason)}</td><td><a href="#" data-run="${esc(a.run_id)}">${esc(a.run_id)}</a></td>`+
+  `<td>${esc(a.reason)}${det}</td><td><a href="#" data-run="${esc(a.run_id)}">${esc(a.run_id)}</a></td>`+
   `<td>${can?`<a href="#" data-undo="${a.id}">show command</a>`:""}</td></tr>`}).join("")+`</table>`:"<p>no actions</p>";
  $("out").querySelectorAll("[data-undo]").forEach(x=>x.onclick=e=>{e.preventDefault();showUndo(`docker compose exec aibrarian-api aibrarian books undo --id ${x.dataset.undo}`);});
  $("out").querySelectorAll("[data-run]").forEach(x=>x.onclick=e=>{e.preventDefault();$("run").value=x.dataset.run;
@@ -277,5 +288,6 @@ async function go(off){
  const pg=$("pg");pg.innerHTML=`${r.total?off+1:0}-${off+r.actions.length} of ${r.total} `;
  if(off>0){const b=document.createElement("a");b.href="#";b.textContent="< newer";b.onclick=e=>{e.preventDefault();go(Math.max(0,off-N))};pg.append(b," ");}
  if(off+N<r.total){const b=document.createElement("a");b.href="#";b.textContent="older >";b.onclick=e=>{e.preventDefault();go(off+N)};pg.append(b);}}
+for(const [k,v] of new URLSearchParams(location.search))if($(k))$(k).value=v;
 go(0);
 </script></body></html>"""

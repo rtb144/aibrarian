@@ -350,6 +350,17 @@ def books_undo(ctx: Context, ids: list[int] | None = None, run_id: str | None = 
     return booklib.undo(acts, ctx.settings, ctx.db, execute, source, progress)
 
 
+def books_validate(ctx: Context, progress=None, source: str = "cli") -> dict[str, Any]:
+    from . import booklib
+
+    return booklib.validate(ctx.settings, ctx.db, source, progress=progress)
+
+
+def latest_validation(ctx: Context) -> dict[str, Any] | None:
+    rows, _ = ctx.db.library_actions(action="validate", limit=1)
+    return rows[0] if rows else None
+
+
 def library_log(ctx: Context, **filters: Any) -> dict[str, Any]:
     """Read-only library action log page + summary (today / totals)."""
     from datetime import UTC, datetime
@@ -361,7 +372,8 @@ def library_log(ctx: Context, **filters: Any) -> dict[str, Any]:
     return {"summary": {"today": ctx.db.library_action_counts(today),
                         "total": ctx.db.library_action_counts(None),
                         "threshold": ctx.settings.book_auto_min_confidence,
-                        "auto_enabled": ctx.settings.book_auto_apply_enabled},
+                        "auto_enabled": ctx.settings.book_auto_apply_enabled,
+                        "validation": latest_validation(ctx)},
             "total": total, "limit": filters.get("limit", 50),
             "offset": filters.get("offset", 0), "actions": rows}
 

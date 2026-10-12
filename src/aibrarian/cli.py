@@ -114,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     ba.add_argument("--execute", action="store_true")
     ba.add_argument("--limit", type=int, help="max suggestions to consider")
     ba.add_argument("--json", action="store_true")
+    bks.add_parser("validate", help="read-only Calibre check (integrity, logged ingests, "
+                   "missing/orphan files); result logged as a validate action")
     bu = bks.add_parser("undo", help="reverse book actions by id or run (dry run unless --execute)")
     bu.add_argument("--id", type=int, action="append", help="library_action id (repeatable)")
     bu.add_argument("--run", help="run id, e.g. books-20261012T095000Z or prefect:<id>")
@@ -309,6 +311,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         res = services.book_autoapply(ctx, args.execute, args.limit, progress=_say)
         print(json.dumps(res, indent=2, default=str) if args.json else format_result(res), end="")
+    elif cmd == "books" and args.books_cmd == "validate":
+        res = services.books_validate(ctx, progress=_say)
+        _print(res)
+        return 0 if res["ok"] else 1
     elif cmd == "books" and args.books_cmd == "undo":
         if not args.id and not args.run:
             print("give --id N (repeatable) or --run RUN", file=sys.stderr)

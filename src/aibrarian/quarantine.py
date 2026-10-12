@@ -493,7 +493,7 @@ def status(root: Path, retention_days: int, now: datetime | None = None) -> dict
 
 # -- empty source folders -------------------------------------------------------
 
-JUNK_SUFFIXES = {".nfo", ".jpg", ".jpeg", ".png", ".txt", ".url"}
+JUNK_SUFFIXES = {".nfo", ".jpg", ".jpeg", ".png", ".txt", ".url", ".opf"}
 JUNK_NAMES = {"thumbs.db", ".ds_store"}
 FOLDER_LOG = "folders.jsonl"
 FOLDER_RESTORED = "folders_restored.jsonl"
