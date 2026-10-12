@@ -69,8 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
     bs.add_argument("--max-items", type=int)
     bs.add_argument("--no-resume", action="store_true")
 
-    ap = sub.add_parser("apply", help="apply suggestions (was apply_moves/apply_renames)")
-    ap.add_argument("--id", type=int, action="append")
+    sg = sub.add_parser("suggestions", help="list suggestions (no-ops hidden)")
+    sg.add_argument("--domain", choices=["video", "book"])
+    sg.add_argument("--status", default="open")
+    sg.add_argument("--include-noop", action="store_true")
+    sg.add_argument("--tsv", action="store_true", help="tab-separated table")
+
+    rj = sub.add_parser("reject", help="dismiss suggestions by id")
+    rj.add_argument("--id", type=int, action="append", required=True)
+
+    ap = sub.add_parser("apply", help="apply suggestions; dry-run unless --apply. "
+                        "With --id only those ids are touched (filters ignored)")
+    ap.add_argument("--id", type=int, action="append", help="repeatable")
     ap.add_argument("--domain", choices=["video", "book"])
     ap.add_argument("--kind", help="movie|tv|music|ebook|audiobook|podcast")
     ap.add_argument("--op", choices=["move", "rename"])
@@ -223,6 +233,17 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
     elif cmd == "book-scan":
         paths = [Path(p) for p in args.path] if args.path else None
         _print(services.book_scan(ctx, paths, not args.no_resume, args.max_items))
+    elif cmd == "suggestions":
+        rows = services.suggestion_rows(ctx, args.domain, args.status, args.include_noop)
+        if args.tsv:
+            cols = ["id", "confidence", "decision", "op", "source_path", "target_path"]
+            print("\t".join(cols))
+            for r in rows:
+                print("\t".join("" if r[k] is None else str(r[k]) for k in cols))
+        else:
+            _print(rows)
+    elif cmd == "reject":
+        _print([services.reject_suggestion(ctx, i) for i in args.id])
     elif cmd == "apply":
         ids = args.id or [
             r["id"] for r in ctx.db.list_suggestions(args.domain)

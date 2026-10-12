@@ -85,29 +85,72 @@ def _allowed_roots(ctx: Context) -> list[Path]:
 
 
 def apply_suggestion(ctx: Context, sid: int, apply: bool = False) -> dict[str, Any]:
+    """Plan (default) or execute one suggestion: move/rename the file plus its
+    sidecars, refuse if the destination exists, repoint the catalog row, record
+    an event and ask Jellyfin to rescan."""
+    from datetime import UTC, datetime
+
+    from .db import is_noop
+
     sug = ctx.db.get_suggestion(sid)
     if sug is None:
         raise KeyError(sid)
-    if not sug["target_path"] or sug["op"] == "none":
-        return {"id": sid, "status": "nothing_to_do", "ops": []}
+    base = {"id": sid, "source_path": sug["source_path"], "target_path": sug["target_path"]}
+    if is_noop(sug["source_path"], sug["target_path"], sug["op"]):
+        return base | {"status": "nothing_to_do", "ops": []}
+    if sug["status"] != "open":
+        return base | {"status": f"not_open:{sug['status']}", "ops": []}
     src, dst = Path(sug["source_path"]), Path(sug["target_path"])
     audit_dir = ctx.settings.report_dir
 
     def audit(r: fileops.OpResult) -> None:
         ctx.db.record_file_op(r.op, r.src, r.dst, r.result, r.error, sid)
 
+    started = datetime.now(UTC)
     ops = fileops.move_with_sidecars(
         src, dst, apply=apply, allowed_roots=_allowed_roots(ctx),
         audit=fileops.chain_audit(audit, fileops.jsonl_audit(audit_dir / "file_ops.jsonl")),
         cleanup_stop=next((r for r in _allowed_roots(ctx) if src.is_relative_to(r)), None))
     main = ops[0] if ops else None
-    status = "planned"
-    if apply and main is not None:
-        status = "applied" if main.result == "ok" else "failed"
-        ctx.db.set_suggestion_status(sid, status)
-        if main.result == "ok":
-            ctx.db.update_path(str(src), str(dst))
-    return {"id": sid, "status": status, "ops": [o.__dict__ for o in ops]}
+    result = main.result if main else "error"
+    status = "planned" if not apply else {"ok": "applied", "skip_dst_exists": "refused_dst_exists",
+                                          "skip_missing": "refused_missing",
+                                          "skip_outside_root": "refused_outside_root"
+                                          }.get(result, "failed")
+    if not apply and result not in ("dry_run", "ok"):
+        status = f"would_refuse:{result}"
+    out = base | {"status": status, "ops": [o.__dict__ for o in ops]}
+    if not apply:
+        return out
+    if status == "applied":
+        ctx.db.set_suggestion_status(sid, "applied")
+        media_id = ctx.db.update_path(str(src), str(dst))
+        out["media_id"] = media_id
+        if media_id is not None:
+            ctx.db.record_event(media_id, "apply_suggestion", ctx.db.get_media(media_id)["stage"],
+                                "info", started, {"suggestion_id": sid, "from": str(src),
+                                                  "to": str(dst), "sidecars": len(ops) - 1})
+        out["jellyfin_refresh"] = ctx.jellyfin.refresh_library()
+    elif status == "failed":
+        ctx.db.set_suggestion_status(sid, "failed")
+    # refused_*: left open so it can be fixed and retried
+    return out
+
+
+def reject_suggestion(ctx: Context, sid: int) -> dict[str, Any]:
+    if ctx.db.get_suggestion(sid) is None:
+        raise KeyError(sid)
+    ctx.db.set_suggestion_status(sid, "dismissed")
+    return {"id": sid, "status": "dismissed"}
+
+
+def suggestion_rows(ctx: Context, domain: str | None = None, status: str = "open",
+                    include_noop: bool = False) -> list[dict[str, Any]]:
+    """Compact view used by CLI and dashboard."""
+    keys = ("id", "domain", "media_kind", "op", "source_path", "target_path", "confidence",
+            "decision", "status")
+    return [{k: r.get(k) for k in keys}
+            for r in ctx.db.list_suggestions(domain, status, include_noop)]
 
 
 def search(ctx: Context, q: str, limit: int = 10, mode: str = "hybrid",

@@ -33,6 +33,10 @@ def list_migrations() -> list[tuple[str, str]]:
     return sorted(out)
 
 
+def is_noop(source: str | None, target: str | None, op: str | None) -> bool:
+    return op == "none" or not target or str(target) == str(source)
+
+
 class Database:
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -207,10 +211,13 @@ class Database:
                              "GROUP BY 1 ORDER BY 2 DESC").fetchall()
         return {r["l"]: r["n"] for r in rows}
 
-    def update_path(self, old: str, new: str) -> None:
+    def update_path(self, old: str, new: str) -> int | None:
+        """Repoint the catalog row (segments/transcripts hang off its id). Returns id."""
         with self.conn() as c:
-            c.execute("UPDATE aib.media_file SET path=%s WHERE path=%s", (new, old))
+            row = c.execute("UPDATE aib.media_file SET path=%s WHERE path=%s RETURNING id",
+                            (new, old)).fetchone()
             c.commit()
+        return row["id"] if row else None
 
     def update_media_fields(self, media_id: int, **fields: Any) -> None:
         allowed = {"duration_s", "probe", "audio_path", "jellyfin_id", "title", "year",
@@ -362,33 +369,39 @@ class Database:
 
     # -- suggestions --------------------------------------------------------
     def save_suggestion(self, s: Suggestion) -> int:
+        """Upsert; a no-op (nothing to move) is stored with status 'noop', op 'none'."""
+        noop = is_noop(s.source_path, s.target_path, s.op)
+        op, status = ("none", "noop") if noop else (s.op, "open")
         with self.conn() as c:
             row = c.execute(
                 """INSERT INTO aib.suggestion
                    (domain, source_path, target_path, metadata, confidence, decision, rationale,
-                    media_kind, op, run_id)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    media_kind, op, run_id, status)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (domain, source_path) DO UPDATE SET
                      target_path=EXCLUDED.target_path, metadata=EXCLUDED.metadata,
                      media_kind=EXCLUDED.media_kind, op=EXCLUDED.op, run_id=EXCLUDED.run_id,
                      confidence=EXCLUDED.confidence, decision=EXCLUDED.decision,
-                     rationale=EXCLUDED.rationale, status='open', created_at=now()
+                     rationale=EXCLUDED.rationale, status=EXCLUDED.status, created_at=now()
                    RETURNING id""",
                 (s.domain, s.source_path, s.target_path, json.dumps(s.metadata),
-                 s.confidence, s.decision, s.rationale, s.media_kind, s.op, s.run_id),
+                 s.confidence, s.decision, s.rationale, s.media_kind, op, s.run_id, status),
             ).fetchone()
             c.commit()
             return row["id"]
 
-    def list_suggestions(self, domain: str | None, status: str = "open") -> list[dict[str, Any]]:
+    def list_suggestions(self, domain: str | None, status: str = "open",
+                         include_noop: bool = False) -> list[dict[str, Any]]:
+        """Suggestions with ``status``; no-ops (status 'noop' or target == source)
+        are hidden unless ``include_noop``."""
+        statuses = [status] + (["noop"] if include_noop and status == "open" else [])
         with self.conn() as c:
-            if domain:
-                return c.execute(
-                    "SELECT * FROM aib.suggestion WHERE domain=%s AND status=%s "
-                    "ORDER BY created_at DESC", (domain, status)).fetchall()
             return c.execute(
-                "SELECT * FROM aib.suggestion WHERE status=%s ORDER BY created_at DESC",
-                (status,)).fetchall()
+                "SELECT * FROM aib.suggestion WHERE status = ANY(%s) "
+                "AND (%s::text IS NULL OR domain=%s) "
+                "AND (%s OR (op <> 'none' AND target_path IS NOT NULL "
+                "AND target_path <> source_path)) ORDER BY created_at DESC",
+                (statuses, domain, domain, include_noop)).fetchall()
 
     def get_suggestion(self, sid: int) -> dict[str, Any] | None:
         with self.conn() as c:
@@ -401,7 +414,7 @@ class Database:
 
     def suggestion_sources(self, domain: str, include_open: bool = True) -> set[str]:
         """Source paths already handled - used to resume interrupted scans."""
-        statuses = ["applied", "dismissed"] + (["open"] if include_open else [])
+        statuses = ["applied", "dismissed", "noop"] + (["open"] if include_open else [])
         with self.conn() as c:
             rows = c.execute("SELECT source_path FROM aib.suggestion WHERE domain=%s "
                              "AND status = ANY(%s)", (domain, statuses)).fetchall()

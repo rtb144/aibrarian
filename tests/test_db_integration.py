@@ -23,7 +23,7 @@ def db():
     with d.conn() as c:
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
-    assert d.migrate() == ["001_init", "002_media_info"]
+    assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop"]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -150,3 +150,16 @@ def test_searchable_titles_only_with_segments(db):
                      "fp", "en", "large-v3", 1.0)
     got = db.searchable_titles()
     assert [r["media_id"] for r in got] == [rows[0]["id"]] and got[0]["title"]
+
+
+def test_noop_suggestions_hidden(db):
+    def sg(src, dst, op="move"):
+        return Suggestion(domain="video", source_path=src, target_path=dst, confidence=0.9,
+                          decision="suggest", op=op)
+    a = db.save_suggestion(sg("/m/a.mkv", "/m/A/a.mkv"))
+    b = db.save_suggestion(sg("/m/b.mkv", "/m/b.mkv"))
+    assert [r["id"] for r in db.list_suggestions("video")] == [a]
+    assert {r["id"] for r in db.list_suggestions(None, include_noop=True)} == {a, b}
+    assert db.get_suggestion(b)["status"] == "noop" and "/m/b.mkv" in db.suggestion_sources("video")
+    mid = db.upsert_media([mf("/m/a.mkv")])[0]["id"]
+    assert db.update_path("/m/a.mkv", "/m/A/a.mkv") == mid and db.update_path("/nope", "/x") is None

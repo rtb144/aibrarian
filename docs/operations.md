@@ -84,3 +84,17 @@ apply in name order, each once, and are recorded in `aib.schema_migrations`.
 - `GET /titles/autocomplete?q=jump&limit=10`, `GET /titles/resolve?title=...`.
 - `POST /clip` with `title` uses the same resolver.
 - CLI: `aibrarian search "quote" --title "22 Jump Street (2014)"`.
+
+## Reviewing and applying suggestions
+
+- No-op suggestions (target == source, or op `none`) are stored with status `noop`
+  and hidden from `GET /suggestions` / `aibrarian suggestions` unless
+  `include_noop=true` / `--include-noop`.
+- List: `aibrarian suggestions --domain video --tsv` (id, confidence, decision, op, source, target).
+- Dry-run specific ids: `aibrarian apply --id 12 --id 15` (filters are ignored when `--id` is given).
+- Execute: `aibrarian apply --id 12 --id 15 --apply`. Sidecars move with the file, an
+  existing destination is refused (suggestion stays open), the catalog path is
+  updated (segments stay linked by id), an `apply_suggestion` event is recorded and
+  Jellyfin is asked to rescan.
+- API: `POST /suggestions/{id}/apply` (dry-run unless `dry_run=false`),
+  `POST /suggestions/{id}/reject`. CLI: `aibrarian reject --id N`.

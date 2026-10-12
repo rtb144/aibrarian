@@ -290,12 +290,13 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
         return {"ok": True, "queued": "book-scan"}
 
     @app.get("/suggestions")
-    def suggestions(domain: str | None = None, status: str = "open"):
-        return c().db.list_suggestions(domain, status)
+    def suggestions(domain: str | None = None, status: str = "open", include_noop: bool = False):
+        """Full rows (incl. ``id``); no-ops (target == source) hidden by default."""
+        return c().db.list_suggestions(domain, status, include_noop)
 
     @app.get("/book-suggestions")
     def book_suggestions():
-        return c().db.list_suggestions("book")
+        return c().db.list_suggestions("book", "open", False)
 
     @app.post("/suggestions/{sid}/apply")
     def apply(sid: int, dry_run: bool = True):
@@ -305,9 +306,12 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
             raise HTTPException(404, "suggestion not found") from exc
 
     @app.post("/suggestions/{sid}/dismiss")
+    @app.post("/suggestions/{sid}/reject")
     def dismiss(sid: int):
-        c().db.set_suggestion_status(sid, "dismissed")
-        return {"id": sid, "status": "dismissed"}
+        try:
+            return services.reject_suggestion(c(), sid)
+        except KeyError as exc:
+            raise HTTPException(404, "suggestion not found") from exc
 
     # -- open library ------------------------------------------------------
     @app.get("/openlibrary/lookup")
