@@ -170,6 +170,21 @@ def quarantine_purge_flow(older_than_days: int | None = None, execute: bool = Tr
     return {k: v for k, v in res.items() if k != "items"}
 
 
+@flow(name="book-autoapply", log_prints=True)
+def book_autoapply_flow(limit: int | None = None) -> dict:
+    """Apply open book suggestions >= BOOK_AUTO_MIN_CONFIDENCE (rename/move with sidecars,
+    identical copies quarantined, the rest needs_review). Off: BOOK_AUTO_APPLY_ENABLED=false."""
+    from aibrarian.services import book_autoapply
+
+    s = get_settings()
+    if not s.book_auto_apply_enabled:
+        log.info("book-autoapply disabled (BOOK_AUTO_APPLY_ENABLED=false)")
+        return {"enabled": False}
+    n = limit if limit is not None else (s.book_auto_batch_limit or None)
+    res = book_autoapply(ctx(), True, n, progress=log.info, source=f"prefect:{_run_ids()[0]}")
+    return {k: v for k, v in res.items() if k != "items"}
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -203,6 +218,7 @@ def deployments(group: str) -> list:
            reprobe_flow.to_deployment("reprobe", **one),
            duplicates_flow.to_deployment("duplicates", cron="0 4 * * 0", **one),
            dedup_quarantine_flow.to_deployment("dedup-quarantine", cron="0 5 * * 0", **one),
+           book_autoapply_flow.to_deployment("book-autoapply", cron="50 * * * *", **one),
            quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]

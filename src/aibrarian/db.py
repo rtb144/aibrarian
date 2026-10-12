@@ -304,6 +304,75 @@ class Database:
                              "FROM aib.dedup_action GROUP BY action").fetchall()
         return {r["action"]: {"files": r["n"], "bytes": int(r["b"])} for r in rows}
 
+    LIB_COLS = ("ts", "run_id", "action", "domain", "suggestion_id", "old_path", "new_path",
+                "title", "author", "series", "series_index", "confidence", "reason", "source",
+                "details")
+
+    def record_library_action(self, row: dict[str, Any]) -> int:
+        vals = [json.dumps(row.get(k) or {}, default=str) if k == "details" else row.get(k)
+                for k in self.LIB_COLS]
+        vals[3] = vals[3] or "book"
+        with self.conn() as c:
+            r = c.execute(f"INSERT INTO aib.library_action ({', '.join(self.LIB_COLS)}) VALUES "
+                          f"(COALESCE(%s, now()),{','.join(['%s'] * (len(vals) - 1))}) "
+                          "RETURNING id", vals).fetchone()
+            c.commit()
+        return r["id"]
+
+    def get_library_actions(self, ids: Sequence[int] | None = None,
+                            run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.library_action WHERE (id = ANY(%s) OR run_id=%s)"
+                             " ORDER BY id DESC", (list(ids or []), run_id)).fetchall()
+
+    def mark_library_undone(self, action_id: int, undo_id: int) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE aib.library_action SET undone_by=%s WHERE id=%s",
+                      (undo_id, action_id))
+            c.commit()
+
+    _LIB_FILTERS = ("(%(a)s::text IS NULL OR action=%(a)s) AND "
+                    "(%(d)s::text IS NULL OR domain=%(d)s) AND "
+                    "(%(s)s::timestamptz IS NULL OR ts>=%(s)s) AND "
+                    "(%(u)s::timestamptz IS NULL OR ts<%(u)s) AND "
+                    "(%(t)s::text IS NULL OR title ILIKE %(tl)s OR old_path ILIKE %(tl)s "
+                    "OR new_path ILIKE %(tl)s) AND "
+                    "(%(au)s::text IS NULL OR author ILIKE %(aul)s) AND "
+                    "(%(se)s::text IS NULL OR series ILIKE %(sel)s) AND "
+                    "(%(r)s::text IS NULL OR run_id=%(r)s)")
+
+    def library_actions(self, action: str | None = None, domain: str | None = None,
+                        since: Any = None, until: Any = None, title: str | None = None,
+                        author: str | None = None, series: str | None = None,
+                        run_id: str | None = None, limit: int = 50,
+                        offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        p = {"a": action, "d": domain, "s": since, "u": until, "t": title, "tl": f"%{title}%",
+             "au": author, "aul": f"%{author}%", "se": series, "sel": f"%{series}%",
+             "r": run_id, "lim": limit, "off": offset}
+        with self.conn() as c:
+            rows = c.execute(f"SELECT * FROM aib.library_action WHERE {self._LIB_FILTERS} "
+                             "ORDER BY ts DESC, id DESC LIMIT %(lim)s OFFSET %(off)s",
+                             p).fetchall()
+            total = c.execute(f"SELECT count(*) AS n FROM aib.library_action WHERE "
+                              f"{self._LIB_FILTERS}", p).fetchone()["n"]
+        return rows, total
+
+    def library_action_counts(self, since: Any = None) -> dict[str, int]:
+        with self.conn() as c:
+            rows = c.execute("SELECT action, count(*) AS n FROM aib.library_action WHERE "
+                             "(%s::timestamptz IS NULL OR ts>=%s) GROUP BY action",
+                             (since, since)).fetchall()
+        return {r["action"]: r["n"] for r in rows}
+
+    def library_facet(self, field: str, q: str = "", limit: int = 20) -> list[str]:
+        if field not in ("title", "author", "series"):
+            raise ValueError(field)
+        with self.conn() as c:
+            rows = c.execute(f"SELECT {field} AS v, count(*) AS n FROM aib.library_action "
+                             f"WHERE {field} ILIKE %s GROUP BY {field} ORDER BY n DESC, v "
+                             "LIMIT %s", (f"%{q}%", limit)).fetchall()
+        return [r["v"] for r in rows]
+
     def audio_layout_counts(self) -> dict[str, int]:
         with self.conn() as c:
             rows = c.execute("SELECT coalesce(audio_layout, 'unknown') AS l, count(*) AS n "
@@ -514,7 +583,8 @@ class Database:
 
     def suggestion_sources(self, domain: str, include_open: bool = True) -> set[str]:
         """Source paths already handled - used to resume interrupted scans."""
-        statuses = ["applied", "dismissed", "noop"] + (["open"] if include_open else [])
+        statuses = ["applied", "dismissed", "noop", "needs_review", "quarantined",
+                    "undone"] + (["open"] if include_open else [])
         with self.conn() as c:
             rows = c.execute("SELECT source_path FROM aib.suggestion WHERE domain=%s "
                              "AND status = ANY(%s)", (domain, statuses)).fetchall()

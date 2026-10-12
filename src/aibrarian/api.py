@@ -23,7 +23,13 @@ from aibrarian import __version__
 from . import services
 from .actions import Context, RetryableError, run_action
 from .config import get_settings
-from .dashboard import DASHBOARD_HTML, DEDUP_UI_HTML, DUPLICATES_UI_HTML, SEARCH_UI_HTML
+from .dashboard import (
+    DASHBOARD_HTML,
+    DEDUP_UI_HTML,
+    DUPLICATES_UI_HTML,
+    LIBRARY_LOG_UI_HTML,
+    SEARCH_UI_HTML,
+)
 from .metrics import SUGGESTIONS_OPEN, refresh_stage_gauges
 from .status import ACTIONS, Stage
 from .titles import TitleNotResolved
@@ -284,6 +290,26 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
                       limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
         """Read-only dedup action log (newest first) + summary."""
         return services.dedup_actions(c(), action, since, until, q, limit, offset)
+
+    @app.get("/library-log")
+    def library_log(action: str | None = None, domain: str | None = None,
+                    since: str | None = None, until: str | None = None,
+                    title: str | None = None, author: str | None = None,
+                    series: str | None = None, run_id: str | None = None,
+                    limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
+        """Read-only automatic library action log (newest first) + today/total counts."""
+        return services.library_log(c(), action=action, domain=domain, since=since,
+                                    until=until, title=title, author=author, series=series,
+                                    run_id=run_id, limit=limit, offset=offset)
+
+    @app.get("/library-log/facets")
+    def library_facets(field: str = Query(..., pattern="^(title|author|series)$"), q: str = "",
+                       limit: int = Query(20, ge=1, le=100)):
+        return c().db.library_facet(field, q, limit)
+
+    @app.get("/library-log/ui", response_class=HTMLResponse)
+    def library_log_ui() -> str:
+        return LIBRARY_LOG_UI_HTML
 
     @app.get("/dedup/ui", response_class=HTMLResponse)
     def dedup_ui() -> str:

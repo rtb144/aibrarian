@@ -218,3 +218,69 @@ the table existed are back-filled automatically when the API or worker starts (i
 - JSON: `GET /dedup/actions?action=&since=&until=&q=&limit=&offset=`.
 - `/duplicates/ui` also shows what is in quarantine, its age and the next purge run
   (`GET /duplicates/quarantine`).
+
+## Automatic book librarian (`book-autoapply`)
+
+`book-scan` (hourly :30) records book suggestions; `book-autoapply` (hourly :50 UTC,
+concurrency 1 / CANCEL_NEW, cpu worker) applies them. No-op suggestions (target == source)
+are hidden and never touched.
+
+Per open book suggestion, oldest first, up to `BOOK_AUTO_BATCH_LIMIT` (default 50, 0 = all):
+
+| Situation | Result |
+|---|---|
+| confidence < `BOOK_AUTO_MIN_CONFIDENCE` (default **0.90**, 0-1 scale) | `needs_review`, file untouched |
+| source missing | `skip` (suggestion `failed`) |
+| source not under `/media`, or target outside Calibre/Audiobookshelf roots | `needs_review` |
+| target exists, byte-identical (size + sha256) | incoming copy **quarantined** (same `QUARANTINE_DIR`, manifest, 30-day purge as video) |
+| target exists, different | `needs_review` (never overwrite) |
+| target on another filesystem / mount (`EXDEV`) | `needs_review` (never copy) |
+| otherwise | `os.rename` to the target (`move` or `rename`) with sidecars |
+
+Sidecars that travel with a book: same-stem files (`Book.opf`, `Book.jpg`, `Book.nfo` …) and,
+when the folder holds just that one book, `cover.jpg/png`, `metadata.opf`, `folder.jpg`,
+`desc.txt`, `reader.txt`. Nothing is overwritten (a clashing sidecar → `needs_review`).
+The emptied source folder is removed with the same rules as `duplicates cleanup-empty`
+(leftover junk quarantined, library roots never removed).
+
+> Note: `/media`, `/books` and `/audiobookshelf` are separate bind mounts in the containers,
+> so a move between them is a cross-mount rename and ends in `needs_review` ("another
+> filesystem"). Only moves within one mount are applied automatically.
+
+```bash
+dc exec aibrarian-api aibrarian books autoapply --limit 10            # dry run: confidence, PASS/below, decision
+dc exec aibrarian-api aibrarian books autoapply --limit 10 --execute
+dc exec aibrarian-api aibrarian books undo --id 42                    # dry run
+dc exec aibrarian-api aibrarian books undo --run books-20261012T095000Z --execute
+```
+
+The dry run prints one line per suggestion on stderr (`[k/n] 0.93 PASS 0.90 -> apply <path>`)
+and a table on stdout (`id, confidence, passes, decision, title, author, source, target, reason`).
+`--json` gives the full plan.
+
+`.env` knobs: `BOOK_AUTO_APPLY_ENABLED=true` (set `false` + `dc up -d aibrarian-worker` to
+pause), `BOOK_AUTO_BATCH_LIMIT=50`, `BOOK_AUTO_MIN_CONFIDENCE=0.90`.
+
+Book duplicates: the duplicates report and `dedup-quarantine` also cover identical books
+across Calibre, Audiobookshelf, `book_drop` and `downloads` (book group numbers start at
+10001). The keeper is the copy inside the library; only copies under `/media` are moved.
+
+### Undo
+
+`aibrarian books undo --id N` (repeatable) or `--run RUN` reverses `move` / `rename` /
+`quarantine` actions newest first (dry run unless `--execute`): files and sidecars go back,
+removed folders are recreated with their leftovers, the suggestion becomes `undone` (so it is
+not re-applied), and an `undo` row is logged. It never overwrites; a blocked item is reported.
+
+### Library log
+
+Every `move`, `rename`, `quarantine`, `skip`, `needs_review`, `error`, `undo`,
+`folder_removed` goes to `aib.library_action` (ts, run_id, domain, old/new path, title, author,
+series, series index, confidence, reason, source `cli`/`prefect:<flow run id>`, details for
+undo) and to `/data/reports/library-actions.log` (JSONL, outside the quarantine, never purged).
+
+- Page: `http://z8g4:8790/library-log/ui` (today + total cards; filters for day/date range,
+  title, author, series with autocomplete, action, domain, run; newest first; paging;
+  read-only, "show command" prints the undo CLI). Linked from `/dashboard` and `/dedup/ui`.
+- JSON: `GET /library-log?action=&domain=&since=&until=&title=&author=&series=&run_id=&limit=&offset=`,
+  `GET /library-log/facets?field=author&q=her`.

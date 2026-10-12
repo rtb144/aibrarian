@@ -254,6 +254,7 @@ def quarantine_plan(ctx: Context, groups: list[int] | None = None, limit: int | 
             progress("building exact-duplicates report (hash cache makes re-runs fast)...")
         rep = duplicates.report(ctx.db.duplicate_candidates(), duplicates.HashCache(ctx.db),
                                 exact_only=True)
+        rep["identical_books"] = book_duplicate_groups(ctx)
     return quarantine.plan(rep, ctx.settings, groups, limit)
 
 
@@ -319,6 +320,52 @@ def quarantine_status(ctx: Context) -> dict[str, Any]:
                              ctx.settings.quarantine_retention_days)
 
 
+def book_duplicate_groups(ctx: Context) -> list[dict[str, Any]]:
+    """Identical books across Calibre, Audiobookshelf and the book drop folders."""
+    from . import booklib, duplicates
+
+    s = ctx.settings
+    rows = duplicates.book_rows(booklib.library_roots(s) + list(s.book_source_dirs),
+                                [s.quarantine_root()])
+    return duplicates.book_groups(rows, duplicates.HashCache(ctx.db), s.media_root)
+
+
+def book_suggestions_oldest_first(ctx: Context) -> list[dict[str, Any]]:
+    return sorted(ctx.db.list_suggestions("book", "open"), key=lambda r: r["id"])
+
+
+def book_autoapply(ctx: Context, execute: bool = False, limit: int | None = None,
+                   progress=None, source: str = "cli") -> dict[str, Any]:
+    from . import booklib
+
+    return booklib.autoapply(book_suggestions_oldest_first(ctx), ctx.settings, ctx.db, execute,
+                             limit, source, progress=progress)
+
+
+def books_undo(ctx: Context, ids: list[int] | None = None, run_id: str | None = None,
+               execute: bool = False, progress=None, source: str = "cli") -> dict[str, Any]:
+    from . import booklib
+
+    acts = ctx.db.get_library_actions(ids, run_id)
+    return booklib.undo(acts, ctx.settings, ctx.db, execute, source, progress)
+
+
+def library_log(ctx: Context, **filters: Any) -> dict[str, Any]:
+    """Read-only library action log page + summary (today / totals)."""
+    from datetime import UTC, datetime
+
+    clean = {k: (v or None) for k, v in filters.items() if k not in ("limit", "offset")}
+    rows, total = ctx.db.library_actions(limit=filters.get("limit", 50),
+                                         offset=filters.get("offset", 0), **clean)
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return {"summary": {"today": ctx.db.library_action_counts(today),
+                        "total": ctx.db.library_action_counts(None),
+                        "threshold": ctx.settings.book_auto_min_confidence,
+                        "auto_enabled": ctx.settings.book_auto_apply_enabled},
+            "total": total, "limit": filters.get("limit", 50),
+            "offset": filters.get("offset", 0), "actions": rows}
+
+
 def duplicates_report(ctx: Context, exact_only: bool = False,
                       duration_tol: float = 2.0) -> dict[str, Any]:
     """Read-only; see duplicates.py. Result also cached to report_dir/duplicates.json."""
@@ -328,6 +375,14 @@ def duplicates_report(ctx: Context, exact_only: bool = False,
 
     rep = duplicates.report(ctx.db.duplicate_candidates(), duplicates.HashCache(ctx.db),
                             exact_only, duration_tol)
+    try:
+        rep["identical_books"] = book_duplicate_groups(ctx)
+    except OSError as exc:
+        log.warning("book duplicates failed", extra={"error": str(exc)})
+        rep["identical_books"] = []
+    rep["summary"]["identical_book_groups"] = len(rep["identical_books"])
+    rep["summary"]["identical_book_reclaimable_bytes"] = sum(
+        g["reclaimable_bytes"] for g in rep["identical_books"])
     try:
         ctx.settings.report_dir.mkdir(parents=True, exist_ok=True)
         (ctx.settings.report_dir / "duplicates.json").write_text(json.dumps(rep, default=str))

@@ -145,7 +145,7 @@ you go (edit this file, or copy it into Obsidian).
   Do: `curl 'z8g4:8790/suggestions?domain=video' | jq '.[0:5] | .[] | {source_path,target_path,confidence,decision}'`
   Done when: you've looked at 5 and they make sense (just note any that look wrong).
 
-- [ ] **4.9 Run the book scan.**
+- [x] **4.9 Run the book scan.** (663 open suggestions, 2026-10-12)
   Do: `curl -X POST z8g4:8790/book-scan -H 'content-type: application/json' -d '{"max_items":10}'`
   Done when: `curl z8g4:8790/book-suggestions | jq length` is above 0.
 
@@ -182,10 +182,18 @@ you go (edit this file, or copy it into Obsidian).
 - [x] **5.4b Quarantine identical duplicates (first batch: 3 files, 50.74 GB, still playable).**
   Do: `dc exec aibrarian-api aibrarian duplicates quarantine --limit 3` then `--execute`.
 
-- [ ] **5.4c Let the automation run.** `dedup-quarantine` (Sun 05:00 UTC) quarantines identical
+- [x] **5.4c Let the automation run.** (deployed + verified 2026-10-12) `dedup-quarantine` (Sun 05:00 UTC) quarantines identical
   copies in batches of `DEDUP_BATCH_LIMIT`; `quarantine-purge` (daily 04:37 UTC) deletes them
   after `QUARANTINE_RETENTION_DAYS` (30). Watch `/dedup/ui`.
   Done when: a week's runs show `quarantine` rows and no `error` rows.
+
+- [ ] **5.4d Automatic book librarian.**
+  Do: `dc exec aibrarian-api aibrarian books autoapply --limit 10` (dry run: confidence and
+  PASS/below 0.90 per book), then `--limit 10 --execute`, check `/library-log/ui`, undo one with
+  `aibrarian books undo --id N` (dry run, then `--execute`). Then let `book-autoapply`
+  (hourly :50) run; pause with `BOOK_AUTO_APPLY_ENABLED=false`.
+  Done when: a day of runs shows moves/quarantines, no `error` rows, and the books open in
+  Calibre/Audiobookshelf. Check the `needs_review` rows (many may be "another filesystem").
 
 - [ ] **5.5 Repair old orphaned subtitles.**
   Do: `dc exec aibrarian-api aibrarian srt-report --log /data/old-reports/<move_log>.jsonl` then `sync-subtitles --log … --apply`

@@ -283,3 +283,63 @@ def to_tsv(rep: dict[str, Any]) -> str:
                     c["audio_layout"] or "", c["audio_streams"], c["subtitle_streams"],
                     ",".join(c["sidecars"]), g["reason"])))
     return "\n".join(lines) + "\n"
+
+
+# -- books ---------------------------------------------------------------------
+
+def book_rows(dirs: Iterable[Path], exclude: Iterable[Path] = ()) -> list[dict[str, Any]]:
+    """Book/audiobook files under ``dirs`` (Calibre, Audiobookshelf, book_drop, downloads)."""
+    from .config import AUDIO_EXTENSIONS, BOOK_EXTENSIONS
+    from .media import iter_files
+
+    exts = BOOK_EXTENSIONS | AUDIO_EXTENSIONS
+    seen, rows = set(), []
+    for d in dirs:
+        d = Path(d)
+        if not d.is_dir():
+            continue
+        for p in iter_files(d, None, exclude):
+            if p.suffix.lower() not in exts or str(p) in seen or p.is_symlink():
+                continue
+            seen.add(str(p))
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            rows.append({"id": None, "path": str(p), "size_bytes": st.st_size,
+                         "mtime": st.st_mtime, "title": None, "year": None,
+                         "duration_s": None, "media_info": None, "stage": None})
+    return rows
+
+
+def book_groups(rows: list[dict[str, Any]], cache: HashCache,
+                media_root: Path) -> list[dict[str, Any]]:
+    """Identical book groups. Keeper: a copy inside the libraries (not under media_root),
+    else the shortest path; only copies under media_root are movable to quarantine."""
+    mr = Path(media_root).resolve()
+    out = []
+    for g in find_exact(rows, cache):
+        def lib_first(r: dict) -> tuple:
+            return (Path(r["path"]).resolve().is_relative_to(mr), len(r["path"]), r["path"])
+        g = sorted(g, key=lib_first)
+        keep = g[0]["path"]
+        copies = []
+        for r in g:
+            try:
+                sides = [s.name[len(Path(r["path"]).stem):] for s in related_sidecars(Path(r["path"]))]
+            except OSError:
+                sides = []
+            copies.append({"media_id": None, "path": r["path"], "size_bytes": r["size_bytes"],
+                           "container": Path(r["path"]).suffix.lower().lstrip("."),
+                           "sidecars": sides, "stage": None, "width": None, "height": None,
+                           "video_codec": None, "audio_layout": None, "audio_streams": 0,
+                           "subtitle_streams": 0, "hdr": None,
+                           "movable": Path(r["path"]).resolve().is_relative_to(mr)})
+        movable = [c for c in copies[1:] if c["movable"]]
+        out.append({"kind": "identical", "reason": "byte-identical book (sha256)",
+                    "count": len(copies), "suggested_keep": keep,
+                    "keep_reason": "copy inside the book library" if not copies[0]["movable"]
+                    else "shortest path", "reclaimable_bytes": sum(c["size_bytes"] for c in movable),
+                    "sidecars_only_on_others": [], "copies": copies})
+    out.sort(key=lambda g: -g["reclaimable_bytes"])
+    return out

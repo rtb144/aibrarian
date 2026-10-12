@@ -107,6 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--path", action="append", help="only these (original or quarantine) paths")
     dr.add_argument("--execute", action="store_true")
 
+    bk = sub.add_parser("books", help="automatic book librarian (see docs/operations.md)")
+    bks = bk.add_subparsers(dest="books_cmd", required=True)
+    ba = bks.add_parser("autoapply", help="apply open book suggestions >= "
+                        "BOOK_AUTO_MIN_CONFIDENCE (dry run unless --execute)")
+    ba.add_argument("--execute", action="store_true")
+    ba.add_argument("--limit", type=int, help="max suggestions to consider")
+    ba.add_argument("--json", action="store_true")
+    bu = bks.add_parser("undo", help="reverse book actions by id or run (dry run unless --execute)")
+    bu.add_argument("--id", type=int, action="append", help="library_action id (repeatable)")
+    bu.add_argument("--run", help="run id, e.g. books-20261012T095000Z or prefect:<id>")
+    bu.add_argument("--execute", action="store_true")
+
     rj = sub.add_parser("reject", help="dismiss suggestions by id")
     rj.add_argument("--id", type=int, action="append", required=True)
 
@@ -292,6 +304,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
             print(f"{verb}: {n} files older than {res['older_than_days']} days in {res['root']}; "
                   f"kept {sum(i['result'] == 'kept' for i in res['items'])}; "
                   f"freed {res['freed_gb']} GB; removed dirs {res['removed_batch_dirs']}")
+    elif cmd == "books" and args.books_cmd == "autoapply":
+        from .booklib import format_result
+
+        res = services.book_autoapply(ctx, args.execute, args.limit, progress=_say)
+        print(json.dumps(res, indent=2, default=str) if args.json else format_result(res), end="")
+    elif cmd == "books" and args.books_cmd == "undo":
+        if not args.id and not args.run:
+            print("give --id N (repeatable) or --run RUN", file=sys.stderr)
+            return 2
+        _print(services.books_undo(ctx, args.id, args.run, args.execute, progress=_say))
     elif cmd == "duplicates" and args.dup_cmd == "cleanup-empty":
         _print(services.cleanup_empty_folders(ctx, args.execute, progress=_say))
     elif cmd == "duplicates" and args.dup_cmd == "quarantine-status":

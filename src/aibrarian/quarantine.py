@@ -31,6 +31,7 @@ from aibrarian.duplicates import full_hash  # absolute: Prefect-safe
 
 log = logging.getLogger(__name__)
 QUARANTINE_DIRNAME = "_quarantine"
+BOOK_GROUP_BASE = 10001  # identical BOOK groups are numbered 10001, 10002, ...
 
 
 def quarantine_root(settings) -> Path:
@@ -44,12 +45,14 @@ def plan(rep: dict[str, Any], settings, groups: list[int] | None = None,
     media_root = Path(settings.media_root)
     batch = quarantine_root(settings) / (day or date.today()).isoformat()
     items: list[dict[str, Any]] = []
-    for gi, g in enumerate(rep.get("identical", []), 1):
+    numbered = list(enumerate(rep.get("identical", []), 1)) + \
+        list(enumerate(rep.get("identical_books", []), BOOK_GROUP_BASE))
+    for gi, g in numbered:
         if groups and gi not in groups:
             continue
         keep = g["suggested_keep"]
         for c in g["copies"]:
-            if c["path"] == keep:
+            if c["path"] == keep or c.get("movable") is False:
                 continue
             src = Path(c["path"])
             try:

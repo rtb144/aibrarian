@@ -111,6 +111,13 @@ class Settings(BaseSettings):
         0.85, validation_alias=_env("book_min_confidence", "BOOK_MIN_CONFIDENCE"))
     book_review_confidence: float = Field(
         0.60, validation_alias=_env("book_review_confidence", "BOOK_REVIEW_THRESHOLD"))
+    # book-autoapply (Prefect, hourly :50): applies open book suggestions >= this
+    book_auto_apply_enabled: bool = Field(
+        True, validation_alias=_env("book_auto_apply_enabled", "BOOK_AUTO_APPLY_ENABLED"))
+    book_auto_batch_limit: int = Field(  # suggestions per run; 0 = unlimited
+        50, validation_alias=_env("book_auto_batch_limit", "BOOK_AUTO_BATCH_LIMIT"))
+    book_auto_min_confidence: float = Field(
+        0.90, validation_alias=_env("book_auto_min_confidence", "BOOK_AUTO_MIN_CONFIDENCE"))
     video_min_confidence: float = 0.85  # auto-catalog Jellyfin match threshold
     video_review_confidence: float = 0.60
 

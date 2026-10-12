@@ -17,7 +17,7 @@ DASHBOARD_HTML = """<!doctype html>
 <h1>aibrarian &middot; media pipeline</h1>
 <div id="summary" class="muted">loading&hellip;</div>
 <div class="cards" id="stages"></div>
-<p><a href="search/ui">Quote search</a> · <a href="duplicates/ui">Duplicates report</a> · <a href="dedup/ui">Dedup actions</a></p>
+<p><a href="search/ui">Quote search</a> · <a href="duplicates/ui">Duplicates report</a> · <a href="dedup/ui">Dedup actions</a> · <a href="library-log/ui">Library log (books)</a></p>
 <h2>Audio layouts</h2><div class="cards" id="layouts"></div>
 <h2 id="listTitle">Failures</h2><table id="list"></table>
 <h2>Timeline <span id="tlTitle" class="muted"></span></h2><table id="timeline"></table>
@@ -161,7 +161,8 @@ async function load(cached){
  document.getElementById("sum").innerHTML=[["identical groups",s.identical_groups],["identical savings",gb(s.identical_reclaimable_bytes)],
   ["review groups",s.review_groups],["review (if all extra copies removed)",gb(s.review_reclaimable_bytes)],["files",s.files_scanned]]
   .map(([k,v])=>`<div class="card"><b>${v}</b>${k}</div>`).join("");
- document.getElementById("out").innerHTML=section("Identical (byte-for-byte)",r.identical)+section("Likely duplicates - review",r.review);
+ document.getElementById("out").innerHTML=section("Identical (byte-for-byte)",r.identical)+section("Likely duplicates - review",r.review)+
+  (r.identical_books?section("Identical books (group numbers start at 10001)",r.identical_books):"");
  try{const z=await (await fetch("../duplicates/quarantine")).json();
  document.getElementById("qs").innerHTML=`<h2>In quarantine (read-only)</h2><p>${z.files} files, ${z.total_gb} GB in <code>${esc(z.root)}</code>.
  Retention ${z.retention_days} days; next purge run ${esc(z.next_purge_run)} (deployment quarantine-purge).</p>`+
@@ -184,6 +185,7 @@ form>*{margin-right:.5rem}
 </style></head><body>
 <h1>Dedup actions (read-only)</h1>
 <p><a href="../dashboard">dashboard</a> · <a href="../duplicates/ui">duplicates report</a> ·
+<a href="../library-log/ui">library log (books)</a> ·
 This page only shows the log; quarantine/restore/purge run from the CLI or Prefect.</p>
 <div class="cards" id="sum">loading...</div>
 <form id="f" onsubmit="go(0);return false">
@@ -212,6 +214,67 @@ async function go(off){
   `<td title="${esc(a.sha256)}">${esc((a.sha256||"").slice(0,12))}</td><td>${esc((a.sidecars_copied||[]).join(", "))}</td>`+
   `<td>${esc(a.reason)}</td><td>${esc(a.source)}</td></tr>`).join("")+`</table>`:"<p>no actions</p>";
  const pg=document.getElementById("pg");pg.innerHTML=`${r.total?off+1:0}-${off+r.actions.length} of ${r.total} `;
+ if(off>0){const b=document.createElement("a");b.href="#";b.textContent="< newer";b.onclick=e=>{e.preventDefault();go(Math.max(0,off-N))};pg.append(b," ");}
+ if(off+N<r.total){const b=document.createElement("a");b.href="#";b.textContent="older >";b.onclick=e=>{e.preventDefault();go(off+N)};pg.append(b);}}
+go(0);
+</script></body></html>"""
+
+
+LIBRARY_LOG_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian library log</title><style>
+body{font-family:system-ui,sans-serif;margin:1.5rem}
+.cards{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem}.card{border:1px solid #ccc;border-radius:6px;padding:.5rem .9rem}
+.card b{display:block;font-size:1.3rem}h3{margin:.6rem 0 .3rem}
+table{border-collapse:collapse;width:100%;margin:.6rem 0}
+td,th{border-bottom:1px solid #ddd;padding:.25rem .4rem;text-align:left;font-size:.85rem;vertical-align:top}
+.a-move,.a-rename{color:#06c}.a-quarantine{color:#a0a}.a-needs_review{color:#a60}.a-error{color:#d00;font-weight:600}
+.a-undo{color:#080}.a-skip{color:#777}form>*{margin:.15rem .3rem .15rem 0}code{background:#f4f4f4;padding:0 .2rem}
+</style></head><body>
+<h1>Library log (read-only)</h1>
+<p><a href="../dashboard">dashboard</a> · <a href="../dedup/ui">dedup actions</a> ·
+Automatic book renames/moves/quarantines. Nothing here changes files; "undo" shows the CLI command.</p>
+<h3>Today</h3><div class="cards" id="today"></div><h3>All time</h3><div class="cards" id="total"></div>
+<form id="f" onsubmit="go(0);return false">
+<input type="date" id="day" title="single day"> or <input type="date" id="since"> to <input type="date" id="until">
+<input id="title" list="l-title" placeholder="book title"><datalist id="l-title"></datalist>
+<input id="author" list="l-author" placeholder="author"><datalist id="l-author"></datalist>
+<input id="series" list="l-series" placeholder="series"><datalist id="l-series"></datalist>
+<select id="action"><option value="">all actions</option><option>move</option><option>rename</option>
+<option>quarantine</option><option>needs_review</option><option>skip</option><option>error</option>
+<option>undo</option><option>folder_removed</option></select>
+<select id="domain"><option value="">all domains</option><option>book</option><option>video</option></select>
+<input id="run" placeholder="run id"> <button>Filter</button></form>
+<p id="undo"></p><div id="out"></div><p id="pg"></p>
+<script>
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const N=50,$=id=>document.getElementById(id);
+const nextDay=d=>{const t=new Date(d+"T00:00:00Z");t.setUTCDate(t.getUTCDate()+1);return t.toISOString().slice(0,10);};
+const cards=o=>Object.keys(o).length?Object.entries(o).map(([k,v])=>`<div class="card"><b>${v}</b>${esc(k)}</div>`).join(""):"<i>nothing</i>";
+for(const f of ["title","author","series"]){$(f).addEventListener("input",async()=>{
+ const r=await (await fetch("../library-log/facets?"+new URLSearchParams({field:f,q:$(f).value}))).json();
+ $("l-"+f).innerHTML=r.map(v=>`<option value="${esc(v)}">`).join("");});}
+function showUndo(cmd){$("undo").innerHTML=`Run on the server (dry run first, then add --execute): <code>${esc(cmd)}</code>`;}
+async function go(off){
+ const p=new URLSearchParams({limit:N,offset:off});
+ if($("day").value){p.set("since",$("day").value);p.set("until",nextDay($("day").value));}
+ else{if($("since").value)p.set("since",$("since").value);if($("until").value)p.set("until",nextDay($("until").value));}
+ for(const k of ["title","author","series","action","domain"])if($(k).value)p.set(k,$(k).value);
+ if($("run").value)p.set("run_id",$("run").value);
+ const r=await (await fetch("../library-log?"+p)).json();
+ $("today").innerHTML=cards(r.summary.today);$("total").innerHTML=cards(r.summary.total)+
+  `<div class="card"><b>${r.summary.threshold}</b>auto threshold${r.summary.auto_enabled?"":" (auto OFF)"}</div>`;
+ $("out").innerHTML=r.actions.length?`<table><tr><th>time (UTC)</th><th>action</th><th>title</th><th>author</th><th>series</th>`+
+  `<th>conf.</th><th>from</th><th>to</th><th>reason</th><th>run</th><th>undo</th></tr>`+r.actions.map(a=>{
+  const can=["move","rename","quarantine"].includes(a.action)&&!a.undone_by;
+  return `<tr><td>${esc(a.ts).slice(0,19)}</td><td class="a-${esc(a.action)}">${esc(a.action)}${a.undone_by?" (undone)":""}</td>`+
+  `<td>${esc(a.title)}</td><td>${esc(a.author)}</td><td>${esc(a.series)}${a.series_index?" #"+esc(a.series_index):""}</td>`+
+  `<td>${a.confidence==null?"":Number(a.confidence).toFixed(2)}</td><td>${esc(a.old_path)}</td><td>${esc(a.new_path)}</td>`+
+  `<td>${esc(a.reason)}</td><td><a href="#" data-run="${esc(a.run_id)}">${esc(a.run_id)}</a></td>`+
+  `<td>${can?`<a href="#" data-undo="${a.id}">show command</a>`:""}</td></tr>`}).join("")+`</table>`:"<p>no actions</p>";
+ $("out").querySelectorAll("[data-undo]").forEach(x=>x.onclick=e=>{e.preventDefault();showUndo(`docker compose exec aibrarian-api aibrarian books undo --id ${x.dataset.undo}`);});
+ $("out").querySelectorAll("[data-run]").forEach(x=>x.onclick=e=>{e.preventDefault();$("run").value=x.dataset.run;
+  showUndo(`docker compose exec aibrarian-api aibrarian books undo --run ${x.dataset.run}`);go(0);});
+ const pg=$("pg");pg.innerHTML=`${r.total?off+1:0}-${off+r.actions.length} of ${r.total} `;
  if(off>0){const b=document.createElement("a");b.href="#";b.textContent="< newer";b.onclick=e=>{e.preventDefault();go(Math.max(0,off-N))};pg.append(b," ");}
  if(off+N<r.total){const b=document.createElement("a");b.href="#";b.textContent="older >";b.onclick=e=>{e.preventDefault();go(off+N)};pg.append(b);}}
 go(0);

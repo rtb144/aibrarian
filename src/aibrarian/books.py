@@ -69,7 +69,11 @@ def epub_metadata(path: Path) -> dict[str, Any]:
             isbn = digits
             break
     date = first("date")
-    return {"title": first("title"), "author": first("creator"), "isbn": isbn,
+    metas = {m.attrib.get("name"): m.attrib.get("content") for m in opf.iter()
+             if m.tag.endswith("meta") and m.attrib.get("name")}
+    return {"series": metas.get("calibre:series"),
+            "series_index": metas.get("calibre:series_index"),
+            "title": first("title"), "author": first("creator"), "isbn": isbn,
             "language": first("language"), "publisher": first("publisher"),
             "year": int(date[:4]) if date and date[:4].isdigit() else None}
 

@@ -24,7 +24,7 @@ def db():
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
     assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop", "004_file_hash",
-                           "005_purged", "006_dedup_action"]
+                           "005_purged", "006_dedup_action", "007_library_action"]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -200,3 +200,34 @@ def test_quarantine_purge_and_dedup_action_log(db):
     assert db.dedup_actions(action="quarantine", q="DUP")[1] == 1
     assert db.dedup_actions(since="2030-01-01")[1] == 0
     assert db.dedup_totals()["purge"] == {"files": 1, "bytes": 10}
+
+
+def test_library_action_log_and_statuses(db):
+    from aibrarian.models import Suggestion
+
+    sid = db.save_suggestion(Suggestion(domain="book", source_path="/m/drop/a.epub",
+                                        target_path="/books/A/a.epub", confidence=0.95,
+                                        decision="suggest"))
+    for st in ("needs_review", "quarantined", "undone"):
+        db.set_suggestion_status(sid, st)
+    assert "/m/drop/a.epub" in db.suggestion_sources("book", include_open=False)
+    base = {"run_id": "r1", "domain": "book", "suggestion_id": sid, "title": "Dune",
+            "author": "Frank Herbert", "series": "Dune", "series_index": "1", "confidence": 0.95,
+            "source": "cli"}
+    a = db.record_library_action(base | {"action": "move", "old_path": "/m/drop/a.epub",
+                                         "new_path": "/books/A/a.epub",
+                                         "details": {"moves": [{"from": "x", "to": "y"}]}})
+    db.record_library_action(base | {"action": "needs_review", "title": "Other",
+                                     "author": "Ann", "series": None, "run_id": "r2"})
+    u = db.record_library_action(base | {"action": "undo", "run_id": "u1"})
+    db.mark_library_undone(a, u)
+    got = db.get_library_actions([a])
+    assert got[0]["undone_by"] == u and got[0]["details"]["moves"][0]["to"] == "y"
+    assert [r["action"] for r in db.get_library_actions(run_id="r1")] == ["move"]
+    rows, total = db.library_actions(author="herbert")
+    assert total == 2 and rows[0]["action"] == "undo"
+    assert db.library_actions(series="dune", action="move")[1] == 1
+    assert db.library_actions(title="other", domain="book")[1] == 1
+    assert db.library_actions(since="2030-01-01")[1] == 0
+    assert db.library_action_counts() == {"move": 1, "needs_review": 1, "undo": 1}
+    assert db.library_facet("author", "her") == ["Frank Herbert"]
