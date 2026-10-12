@@ -23,11 +23,11 @@ from prefect.runtime import flow_run, task_run
 
 from aibrarian.quarantine import PURGE_CRON
 
-from . import services
-from .actions import Context, discover, run_action
-from .config import get_settings
-from .logging_setup import setup_logging
-from .status import ACTIONS, MAX_ATTEMPTS
+from aibrarian import services
+from aibrarian.actions import Context, discover, run_action
+from aibrarian.config import get_settings
+from aibrarian.logging_setup import setup_logging
+from aibrarian.status import ACTIONS, MAX_ATTEMPTS
 
 log = logging.getLogger("aibrarian.flows")
 WORKER = f"{socket.gethostname()}:{os.getpid()}"
@@ -130,7 +130,7 @@ def book_scan_flow(paths: list[str] | None = None, resume: bool = True,
 def reprobe_flow(only_missing: bool = True, limit: int | None = None) -> dict:
     """Refresh ffprobe metadata for items already past 'discovered' without
     resetting their stage (e.g. after the media_info upgrade)."""
-    from .actions import reprobe_all
+    from aibrarian.actions import reprobe_all
 
     return reprobe_all(ctx(), only_missing, limit)
 
@@ -138,7 +138,7 @@ def reprobe_flow(only_missing: bool = True, limit: int | None = None) -> dict:
 @flow(name="duplicates")
 def duplicates_flow(exact_only: bool = False) -> dict:
     """Read-only duplicates report (writes report_dir/duplicates.json)."""
-    from .services import duplicates_report
+    from aibrarian.services import duplicates_report
 
     return duplicates_report(ctx(), exact_only)["summary"]
 
@@ -202,7 +202,7 @@ def retry_failed_flow() -> int:
 
 @flow(name="openlibrary-import")
 def openlibrary_import_flow(dump_path: str, truncate: bool = False) -> dict:
-    from .openlibrary import import_dump
+    from aibrarian.openlibrary import import_dump
 
     ins, skip = import_dump(Path(dump_path), get_settings().database_url, truncate=truncate,
                             log=log.info)
