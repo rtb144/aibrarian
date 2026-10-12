@@ -110,11 +110,11 @@ def audio_target(s, ev: dict[str, Any], src: Path, sug: dict[str, Any]) -> Path 
 
 
 def assess(sug: dict[str, Any], s, calibre: Calibre | None = None,
-           hasher=full_hash) -> dict[str, Any]:
+           hasher=full_hash, ref_lookup=None) -> dict[str, Any]:
     """Pure check (no writes). ``decision``: calibre_add | add_format | quarantine | move |
     needs_review | skip. Dry runs print exactly this."""
     src = Path(sug["source_path"])
-    ev = evaluate(sug)
+    ev = evaluate(sug, ref_lookup)
     thr = s.book_auto_min_confidence
     base = {"suggestion_id": sug["id"], "old_path": str(src), "new_path": None,
             "threshold": thr, "passes": ev["confidence"] >= thr, **ev}
@@ -390,16 +390,24 @@ def _quarantine_copy_back(copy: Path, original: Path, s, db, logger) -> str | No
 def autoapply(sugs: list[dict[str, Any]], s, db=None, execute: bool = False,
               limit: int | None = None, source: str = "cli", run_id: str | None = None,
               progress: Callable[[str], None] | None = None, hasher=full_hash,
-              calibre: Calibre | None = None) -> dict[str, Any]:
-    """Dry run (default) or execute. ``sugs``: open book suggestions, oldest first."""
+              calibre: Calibre | None = None, ref_lookup: Any = "auto") -> dict[str, Any]:
+    """Dry run (default) or execute. ``sugs``: open book suggestions, oldest first.
+    ``ref_lookup``: Open Library index lookup; ``"auto"`` opens ``OL_INDEX_PATH`` if built."""
     say = progress or (lambda _m: None)
     cal = calibre or make_calibre(s)
+    if ref_lookup == "auto":
+        from aibrarian.olindex import make_ref_lookup
+
+        ref_lookup = make_ref_lookup(s)
+        if ref_lookup is None:
+            say("note: no Open Library index (aibrarian openlibrary build-index); "
+                "scores use stored references only")
     run_id = run_id or "books-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     logger = ActionLog(db, Path(s.report_dir), run_id, source)
     sugs = sugs[:limit] if limit else sugs
     items, counts = [], {}
     for k, sug in enumerate(sugs, 1):
-        it = assess(sug, s, cal, hasher)
+        it = assess(sug, s, cal, hasher, ref_lookup)
         say(f"[{k}/{len(sugs)}] {it['confidence']:.2f} "
             f"{'PASS' if it['passes'] else 'below'} {it['threshold']:.2f} -> {it['decision']}: "
             f"{it['title']!r} by {it['author']!r}"

@@ -149,9 +149,14 @@ you go (edit this file, or copy it into Obsidian).
   Do: `curl -X POST z8g4:8790/book-scan -H 'content-type: application/json' -d '{"max_items":10}'`
   Done when: `curl z8g4:8790/book-suggestions | jq length` is above 0.
 
-- [ ] **4.10 Import Open Library (runs about 1–2 h in the background).**
-  Do: Prefect UI → `openlibrary-import` → Run → set `dump_path` to `/data/openlibrary/<your dump file>`.
-  Done when: `curl z8g4:8790/openlibrary/stats` shows a big `editions` number.
+- [ ] **4.10 Build the Open Library reference index (runs ~1–3 h in the background).**
+  Uses the existing Delta Lake at `/opt/openlibrary/delta` (mounted read-only at
+  `/openlibrary/delta`); the old dump import (`openlibrary-import`) is not needed.
+  Do: Prefect UI → `openlibrary-index` → Run (or wait for Saturday 01:15 UTC).
+  Watch: `docker compose exec aibrarian-api aibrarian openlibrary stats` (progress, files done)
+  or the flow run logs.
+  Done when: `curl z8g4:8790/openlibrary/stats` shows `index.built_at` and tens of millions of
+  `rows_edition` / `rows_isbn`.
 
 - [ ] **4.11 Hook up Prometheus.**
   Do: append `docker/prometheus/aibrarian-scrape.yml` to the `scrape_configs` in `/opt/stacks/monitoring`'s prometheus.yml, then restart Prometheus.

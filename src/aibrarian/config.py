@@ -59,6 +59,10 @@ class Settings(BaseSettings):
 
     # --- media layout (container paths) ------------------------------------
     media_root: Path = Field(Path("/media"), validation_alias=_env("media_root", "MEDIA_ROOT"))
+    ol_delta_dir: Path = Field(Path("/openlibrary/delta"),
+                               validation_alias=_env("ol_delta_dir", "OL_DELTA_DIR"))
+    ol_index_path: Path = Field(Path("/data/olindex/openlibrary.sqlite"),
+                                validation_alias=_env("ol_index_path", "OL_INDEX_PATH"))
     report_dir: Path = Field(Path("/data/reports"), validation_alias=_env("report_dir", "REPORT_DIR"))
     transcribe_roots: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["01-movies", "02-tvshows", "05-instructional_videos"]
@@ -116,7 +120,8 @@ class Settings(BaseSettings):
         True, validation_alias=_env("book_auto_apply_enabled", "BOOK_AUTO_APPLY_ENABLED"))
     book_auto_batch_limit: int = Field(  # suggestions per run; 0 = unlimited
         50, validation_alias=_env("book_auto_batch_limit", "BOOK_AUTO_BATCH_LIMIT"))
-    calibredb_bin: str = Field("calibredb", validation_alias=_env("calibredb_bin", "CALIBREDB"))
+    calibredb_bin: str = Field(
+        "calibredb", validation_alias=_env("calibredb_bin", "AIB_CALIBREDB", "CALIBREDB"))
     book_auto_min_confidence: float = Field(
         0.90, validation_alias=_env("book_auto_min_confidence", "BOOK_AUTO_MIN_CONFIDENCE"))
     video_min_confidence: float = 0.85  # auto-catalog Jellyfin match threshold

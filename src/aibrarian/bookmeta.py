@@ -102,7 +102,9 @@ def clean_title(raw: str | None, series: str | None = None,
 def _ratio(a: str | None, b: str | None) -> float:
     if not a or not b:
         return 0.0
-    return fuzz.token_set_ratio(str(a).lower(), str(b).lower()) / 100
+    from .openlibrary import norm  # punctuation-insensitive: 'Leckie, Ann' == 'Ann Leckie'
+
+    return fuzz.token_set_ratio(norm(str(a)), norm(str(b))) / 100
 
 
 def is_junk_title(t: str | None) -> bool:
@@ -141,22 +143,55 @@ def score(embedded: dict[str, Any], ref: dict[str, Any] | None,
     return round(s, 3), why
 
 
-def evaluate(sug: dict[str, Any]) -> dict[str, Any]:
-    """Clean metadata + score for a stored book suggestion (old ones included)."""
+def evaluate(sug: dict[str, Any], ref_lookup=None) -> dict[str, Any]:
+    """Clean metadata + score for a stored book suggestion (old ones included).
+
+    ``ref_lookup(title, author, isbns)`` (the local Open Library index, see
+    :mod:`aibrarian.olindex`) re-queries the reference when given: ISBNs come from the
+    embedded metadata, a sidecar/``metadata.opf`` and check-digit-valid digits in the file
+    name (``1503071278.epub``)."""
     md = sug.get("metadata") or {}
     emb = md.get("embedded") or {}
     ref = md.get("reference") or {}
     cls = md.get("classification") or {}
+    src = Path(sug["source_path"])
     raw_title = emb.get("title") if not is_junk_title(emb.get("title")) else None
+    if ref_lookup is not None:
+        from .olindex import isbn13, isbns_in_name, opf_isbns
+
+        isbns = [i for i in [isbn13(emb.get("isbn"))] + opf_isbns(src) + isbns_in_name(src.name)
+                 if i]
+        q_title = clean_title(raw_title or cls.get("title"))["title"]
+        try:
+            hit = ref_lookup(q_title, emb.get("author") or cls.get("author"),
+                             list(dict.fromkeys(isbns)))
+        except Exception:
+            hit = None
+        if hit:
+            ref = hit
+            if hit.get("match_type") == "isbn" and not emb.get("isbn"):
+                emb = emb | {"isbn": hit.get("isbn13")}
     raw_title = raw_title or ref.get("title") or cls.get("title")
     if is_junk_title(raw_title):
         raw_title = None
     author = emb.get("author") or ref.get("author") or cls.get("author")
     c = clean_title(raw_title, emb.get("series") or cls.get("series"), emb.get("series_index"))
     conf, why = score(emb, ref or None, c["title"], author)
+    if ref.get("source") == "openlibrary-index":
+        why += f" [Open Library {ref.get('edition_key') or ref.get('work_key')}]"
+        # canonical author spelling from Open Library when the match is strong
+        if ref.get("author") and conf >= 0.85 and (
+                not author or _ratio(author, ref["author"]) >= 0.8
+                or ref.get("match_type") == "isbn"):
+            author = ref["author"]
+        if not c["subtitle"] and ref.get("subtitle") and _GENRE.match(ref["subtitle"]):
+            c["subtitle"] = ref["subtitle"]
     isbn = emb.get("isbn") or ref.get("isbn13") or ref.get("isbn10")
+    ids = {}
+    if ref.get("source") == "openlibrary-index":
+        ids = {k: ref[k] for k in ("edition_key", "work_key") if ref.get(k)}
     return {"title": c["title"], "subtitle": c["subtitle"], "author": author,
             "series": c["series"], "series_index": c["series_index"], "isbn": isbn,
             "kind": sug.get("media_kind") or cls.get("kind"), "confidence": conf,
             "score_reason": why, "stored_confidence": sug.get("confidence"),
-            "source_name": Path(sug["source_path"]).name}
+            "openlibrary": ids or None, "source_name": src.name}

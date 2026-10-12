@@ -135,7 +135,9 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(_env_file=None, media_root=tmp_path / "media", work_dir=tmp_path / "work",
                     report_dir=tmp_path / "reports", clips_dir=tmp_path / "clips",
                     calibre_dir=tmp_path / "books", audiobooks_dir=tmp_path / "abs" / "audiobooks",
-                    podcasts_dir=tmp_path / "abs" / "podcasts")
+                    podcasts_dir=tmp_path / "abs" / "podcasts",
+                    ol_index_path=tmp_path / "olindex" / "openlibrary.sqlite",
+                    ol_delta_dir=tmp_path / "delta")
 
 
 @pytest.fixture

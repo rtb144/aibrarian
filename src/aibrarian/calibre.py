@@ -116,6 +116,9 @@ class Calibre:
                 a += ["--series-index", str(meta["series_index"])]
         if meta.get("isbn"):
             a += ["--isbn", str(meta["isbn"])]
+        ol = meta.get("openlibrary") or {}
+        if ol.get("edition_key") or ol.get("work_key"):
+            a += ["--identifier", f"openlibrary:{ol.get('edition_key') or ol.get('work_key')}"]
         a += ["--tags", "aibrarian"]
         return a + [str(src)]
 

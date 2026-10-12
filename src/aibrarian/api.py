@@ -399,8 +399,7 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
 
     @app.get("/openlibrary/stats")
     def ol_stats():
-        with c().db.conn() as conn:
-            return conn.execute("SELECT count(*) AS editions FROM aib.ol_edition").fetchone()
+        return services.openlibrary_stats(c())
 
     @app.middleware("http")
     async def access_log(request: Request, call_next):

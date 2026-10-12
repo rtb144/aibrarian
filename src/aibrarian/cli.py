@@ -175,6 +175,17 @@ def build_parser() -> argparse.ArgumentParser:
     ol.add_argument("--author")
     ol.add_argument("--isbn")
 
+    olx = sub.add_parser("openlibrary", help="local Open Library index from the Delta Lake")
+    olxs = olx.add_subparsers(dest="ol_cmd", required=True)
+    obi = olxs.add_parser("build-index", help="stream OL_DELTA_DIR into OL_INDEX_PATH (hours)")
+    obi.add_argument("--rebuild", action="store_true", help="ignore an up-to-date/partial index")
+    obi.add_argument("--batch-size", type=int, default=50_000)
+    olxs.add_parser("stats", help="index row counts, last build, build progress")
+    olk = olxs.add_parser("lookup", help="query the index")
+    olk.add_argument("--title")
+    olk.add_argument("--author")
+    olk.add_argument("--isbn", action="append", default=[])
+
     gd = sub.add_parser("gen-docs", help="(was gen_docs.py)")
     gd.add_argument("paths", nargs="*", type=Path)
     gd.add_argument("--out", type=Path, default=Path("docs/reference"))
@@ -230,6 +241,22 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         for tag, n in CONCURRENCY.items():
             subprocess.run(["prefect", "concurrency-limit", "create", tag, str(n)], check=False)
+        return 0
+
+    if cmd == "openlibrary":
+        from . import olindex
+
+        if args.ol_cmd == "build-index":
+            olindex.build_index(s.ol_delta_dir, s.ol_index_path, args.batch_size, args.rebuild,
+                                log=lambda m: print(m, file=sys.stderr, flush=True))
+        elif args.ol_cmd == "stats":
+            _print(olindex.stats(s.ol_index_path) | {"delta_dir": str(s.ol_delta_dir)})
+        else:
+            idx = olindex.open_index(s)
+            if idx is None:
+                print("no index at " + str(s.ol_index_path), file=sys.stderr)
+                return 1
+            _print(idx.lookup(args.title, args.author, args.isbn))
         return 0
 
     ctx = _ctx()

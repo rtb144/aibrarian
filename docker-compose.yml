@@ -28,6 +28,8 @@ x-aib-env: &aib-env
   AIB_BOOK_AUTO_BATCH_LIMIT: ${BOOK_AUTO_BATCH_LIMIT:-50}
   AIB_BOOK_AUTO_MIN_CONFIDENCE: ${BOOK_AUTO_MIN_CONFIDENCE:-0.90}
   AIB_CALIBREDB: ${CALIBREDB:-calibredb}
+  AIB_OL_DELTA_DIR: /openlibrary/delta
+  AIB_OL_INDEX_PATH: ${OL_INDEX_PATH:-/data/olindex/openlibrary.sqlite}
   AIB_BOOK_MODE: ${AIB_BOOK_MODE:-suggest}
   AIB_BOOK_MIN_CONFIDENCE: ${AIB_BOOK_MIN_CONFIDENCE:-0.85}
   AIB_BOOK_REVIEW_CONFIDENCE: ${AIB_BOOK_REVIEW_CONFIDENCE:-0.60}
@@ -42,6 +44,7 @@ x-media-volumes: &media-volumes
   - ${ABS_HOST_ROOT:-/opt/audiobookshelf}:/audiobookshelf
   - ${AIB_DATA_HOST_DIR:-/opt/stacks/aibrarian/data}:/data
   - ${OPENLIBRARY_HOST_DIR:-/opt/stacks/ai/openlibrary}:/data/openlibrary:ro
+  - ${OL_DELTA_HOST_DIR:-/opt/openlibrary/delta}:/openlibrary/delta:ro   # Open Library Delta Lake (read-only)
 
 services:
   postgres:

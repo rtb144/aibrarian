@@ -253,7 +253,7 @@ the new book id go to `details` in `aib.library_action` and the JSONL log, expan
 | ISBN lookup hit, title agrees | 0.97 |
 | ISBN hit, title differs | 0.85 |
 | embedded title + author, reference match | 0.50 + 0.45 × min(title%, author%) |
-| embedded title + author, no reference | 0.70 |
+| embedded title + author, no reference (no index match) | 0.70 |
 | embedded title only, reference | 0.40 + 0.30 × title% |
 | filename / LLM guess only | 0.35 (+0.20 × title%) |
 | junk title (hash, `unknown`, digits) | 0.10 |
@@ -316,3 +316,56 @@ library. `calibredb check_library` is *not* used because it VACUUMs the DB. The 
 
 Undo: `calibre_add` → source restored, then `calibredb remove`; `add_format` →
 `remove_format`; `copy` → source restored, the copy moved to `<root>/.aibrarian-trash/<date>/`.
+
+## Open Library reference index (`openlibrary-index`)
+
+The book scorer looks up a local index built from Tom's Open Library Delta Lake
+(`/opt/openlibrary/delta` → `/openlibrary/delta:ro` in api + worker). Tables used: `authors`,
+`works`, `editions` (`records` ignored). Only `record_key, revision, title, subtitle, name,
+personal_name, isbn10, isbn13, works, authors` are read, one parquet file at a time in 50k-row
+batches; `payload_json` is never read. Column types are inspected at runtime (logged as
+`schema …`): `array<string>`, `array<struct{key}>`, `array<struct{author{key}}>` and JSON strings
+all work. Several revisions of one `record_key`: the highest `revision` wins.
+
+Output: `/data/olindex/openlibrary.sqlite` (`OL_INDEX_PATH`). SQLite rather than Postgres:
+single-writer bulk load without WAL/bloat, several times faster, swapped in atomically
+(`os.replace`) at the end so lookups keep using the old index during a rebuild; lookups are
+read-only B-tree reads.
+
+| table | content |
+|---|---|
+| `isbn` | ISBN-13 (ISBN-10 converted) → edition key |
+| `edition` | key, title, subtitle, work key, author keys |
+| `work` | key, title, subtitle, author keys |
+| `author` | key → name |
+| `tkey` | `surname|normalized title` → work (or edition without work) |
+| `meta`, `done` | build state, row counts, `built_at`, finished files (resume) |
+
+The build writes `openlibrary.sqlite.building`; a killed build resumes (finished parquet files
+are skipped) as long as the Delta versions are unchanged. The weekly run (Sat 01:15 UTC,
+concurrency 1) is a no-op when the Delta versions match the built index; `--rebuild` /
+`rebuild=true` forces it.
+
+Estimate: ~100k rows/s on a synthetic benchmark → about 1–3 h for the real tables
+(editions dominate); disk ~20–30 GB for the finished file plus temporary sort files in the
+same folder while the derived tables are built.
+
+```bash
+dc exec -d aibrarian-worker aibrarian openlibrary build-index   # or Prefect UI: openlibrary-index → Run
+dc exec aibrarian-api aibrarian openlibrary stats                # progress / row counts / built_at
+dc exec aibrarian-api aibrarian openlibrary lookup --isbn 1503071278
+dc exec aibrarian-api aibrarian openlibrary lookup --title "Dune" --author "Frank Herbert"
+curl -s z8g4:8790/openlibrary/stats
+```
+
+How the scorer uses it (also for old suggestions, at `books autoapply` time):
+
+* ISBNs from the embedded metadata, a sidecar `Book.opf` / folder `metadata.opf`, and
+  check-digit-valid digits in the file name (`1503071278.epub`) → ISBN match → 0.97
+  (title agrees) or 0.85.
+* Otherwise the author surname + main title (range read on `tkey`, fuzzy on the title) →
+  `0.50 + 0.45 × min(title%, author%)`, max 0.95.
+* On a strong match the Open Library author spelling is used, a junk title is replaced by
+  the Open Library title, and `calibredb add` gets `--identifier openlibrary:OL…M` (or `…W`)
+  and the ISBN. Series are not in these columns, so series still come from the epub /
+  title cleaning.

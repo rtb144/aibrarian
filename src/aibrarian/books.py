@@ -184,7 +184,8 @@ def decide(conf: float, s: Settings) -> Decision:
 
 
 def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
-                 ol_lookup=None, gb_lookup=google_books, run_id: int | None = None) -> Suggestion:
+                 ol_lookup=None, gb_lookup=google_books, run_id: int | None = None,
+                 ref_lookup=None) -> Suggestion:
     meta = extract_metadata(path)
     ref = None
     if ol_lookup is not None:
@@ -205,7 +206,8 @@ def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
     from .bookmeta import evaluate
 
     ev = evaluate({"source_path": str(path), "media_kind": cls["kind"],
-                   "metadata": {"embedded": meta, "reference": ref, "classification": cls}})
+                   "metadata": {"embedded": meta, "reference": ref, "classification": cls}},
+                  ref_lookup)
     cls["llm_confidence"] = cls.get("confidence")
     cls["confidence"] = ev["confidence"]
     dst = destination(cls["kind"], ev["title"] or cls.get("title"), ev["author"],

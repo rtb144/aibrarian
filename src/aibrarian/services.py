@@ -61,7 +61,10 @@ def book_scan(ctx: Context, paths: list[Path] | None = None, resume: bool = True
     dirs = paths or s.book_source_dirs
     run_id = ctx.db.start_run("book", {"dirs": [str(d) for d in dirs]}, flow_run_id)
     done = ctx.db.suggestion_sources("book") if resume else set()
-    ol = make_ol_lookup(ctx.db)
+    from .olindex import make_ref_lookup
+
+    ref = make_ref_lookup(s)
+    ol = (lambda t, a, i: ref(t, a, [i] if i else [])) if ref else make_ol_lookup(ctx.db)
     counts = {"processed": 0, "auto_applied": 0, "skipped_resume": 0}
     for p in books.iter_book_files(dirs):
         if max_items and counts["processed"] >= max_items:
@@ -69,7 +72,8 @@ def book_scan(ctx: Context, paths: list[Path] | None = None, resume: bool = True
         if p.suffix.lower() in VIDEO_EXTENSIONS or str(p) in done:
             counts["skipped_resume"] += 1
             continue
-        sug = books.catalog_file(p, s, ctx.ollama, ol_lookup=ol, run_id=run_id)
+        sug = books.catalog_file(p, s, ctx.ollama, ol_lookup=ol, run_id=run_id,
+                                  ref_lookup=ref)
         sid = ctx.db.save_suggestion(sug)
         counts["processed"] += 1
         if sug.decision == "auto":
@@ -401,3 +405,26 @@ def duplicates_report(ctx: Context, exact_only: bool = False,
     except OSError:
         pass
     return rep
+
+
+def openlibrary_stats(ctx: Context) -> dict[str, Any]:
+    """Index row counts / last build (``aibrarian openlibrary stats``, GET /openlibrary/stats)."""
+    from .olindex import stats
+
+    s = ctx.settings
+    out = {"index": stats(s.ol_index_path), "delta_dir": str(s.ol_delta_dir),
+           "delta_present": Path(s.ol_delta_dir).is_dir()}
+    try:
+        with ctx.db.conn() as c:
+            out["pg_ol_edition_rows"] = c.execute(
+                "SELECT count(*) AS n FROM aib.ol_edition").fetchone()["n"]
+    except Exception:
+        out["pg_ol_edition_rows"] = None
+    return out
+
+
+def openlibrary_build_index(ctx: Context, rebuild: bool = False, log=print) -> dict[str, Any]:
+    from .olindex import build_index
+
+    s = ctx.settings
+    return build_index(Path(s.ol_delta_dir), Path(s.ol_index_path), rebuild=rebuild, log=log)

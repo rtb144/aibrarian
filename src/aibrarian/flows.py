@@ -209,8 +209,23 @@ def openlibrary_import_flow(dump_path: str, truncate: bool = False) -> dict:
     return {"inserted": ins, "skipped": skip}
 
 
+@flow(name="openlibrary-index")
+def openlibrary_index_flow(rebuild: bool = False) -> dict:
+    """Build/refresh the local Open Library index (no-op if the Delta versions are unchanged)."""
+    from prefect import get_run_logger
+
+    from aibrarian import olindex
+
+    s = get_settings()
+    rl = get_run_logger()
+    st = olindex.build_index(Path(s.ol_delta_dir), Path(s.ol_index_path), rebuild=rebuild,
+                             log=rl.info)
+    return {k: v for k, v in st.items() if k.startswith("rows_") or k in ("built_at", "size_gb")}
+
+
 # One run at a time per deployment; a scheduled run that would overlap a
 # still-running one is cancelled instead of piling up.
+OL_INDEX_CRON = "15 1 * * 6"  # weekly, Saturday 01:15 UTC; skips when the Delta is unchanged
 SINGLE_RUN = ConcurrencyLimitConfig(limit=1, collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW)
 
 
@@ -231,7 +246,8 @@ def deployments(group: str) -> list:
            book_autoapply_flow.to_deployment("book-autoapply", cron="50 * * * *", **one),
            calibre_validate_flow.to_deployment("calibre-validate", cron="41 5 * * *", **one),
            quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
-           openlibrary_import_flow.to_deployment("openlibrary-import", **one)]
+           openlibrary_import_flow.to_deployment("openlibrary-import", **one),
+           openlibrary_index_flow.to_deployment("openlibrary-index", cron=OL_INDEX_CRON, **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]
 
 
