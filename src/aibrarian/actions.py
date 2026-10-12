@@ -36,6 +36,7 @@ from .probe import (
     is_english,
     llm_view,
     media_info,
+    run_checked,
     run_ffprobe,
     select_audio_stream,
 )
@@ -253,7 +254,7 @@ def extract_audio(ctx: Context, row: dict) -> Outcome:
               and marker.read_text() == str(sel["index"]))
     if not cached:
         tmp = wav.with_suffix(".part.wav")
-        ctx.runner(extract_audio_cmd(video, tmp, sel["index"]), check=True, capture_output=True)
+        run_checked(extract_audio_cmd(video, tmp, sel["index"]), ctx.runner)
         tmp.replace(wav)
         marker.write_text(str(sel["index"]))
     lang = "en" if sel["english"] else sel.get("language")

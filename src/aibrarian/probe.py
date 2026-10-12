@@ -8,10 +8,24 @@ from pathlib import Path
 from typing import Any
 
 
+class ToolError(RuntimeError):
+    """ffprobe/ffmpeg failed; message carries the tool's stderr."""
+
+
+def run_checked(cmd: list[str], runner=subprocess.run, **kw):
+    try:
+        return runner(cmd, check=True, capture_output=True, **kw)
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or b"")
+        err = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else str(err)
+        tail = " | ".join(line.strip() for line in err.strip().splitlines()[-5:])[-1500:]
+        raise ToolError(f"{cmd[0]} exit {exc.returncode}: {tail or 'no stderr'}") from exc
+
+
 def run_ffprobe(path: Path, runner=subprocess.run, timeout: int = 60) -> dict[str, Any]:
     cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format",
            "-show_streams", "-show_chapters", str(path)]
-    out = runner(cmd, check=True, capture_output=True, timeout=timeout)
+    out = run_checked(cmd, runner, timeout=timeout)
     return json.loads(out.stdout.decode("utf-8", errors="ignore") or "{}")
 
 

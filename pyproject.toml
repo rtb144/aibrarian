@@ -21,10 +21,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-transcribe = ["faster-whisper>=1.1"]
+transcribe = ["faster-whisper>=1.1", "numpy>=1.26"]
 flows = ["prefect>=3.0,<4"]
 media = ["mutagen>=1.47", "pypdf>=4.0"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "numpy>=1.26"]
 
 [project.scripts]
 aibrarian = "aibrarian.cli:main"

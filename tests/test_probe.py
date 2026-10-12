@@ -92,3 +92,51 @@ def test_extract_audio_maps_stream():
     cmd = extract_audio_cmd(Path("/a.mkv"), Path("/o.wav"), 3)
     assert cmd[cmd.index("-map") + 1] == "0:3" and cmd.index("-map") > cmd.index("-i")
     assert "-map" not in extract_audio_cmd(Path("/a.mkv"), Path("/o.wav"))
+
+
+def test_ffprobe_error_includes_stderr():
+    import subprocess
+
+    import pytest
+
+    from aibrarian.probe import ToolError, run_ffprobe
+
+    def runner(cmd, **kw):
+        raise subprocess.CalledProcessError(1, cmd, b"", b"moov atom not found\nInvalid data\n")
+
+    with pytest.raises(ToolError, match="ffprobe exit 1: moov atom not found | Invalid data"):
+        run_ffprobe(Path("/x.mp4"), runner=runner)
+
+
+def test_load_wav_avoids_pyav(tmp_path, monkeypatch):
+    """Regression: faster-whisper decode_audio passes metadata_errors to av.open,
+    which newer PyAV rejects. We must hand it a decoded array instead of a path."""
+    import struct
+    import sys
+    import wave
+
+    import numpy as np
+
+    from aibrarian.transcribe import WhisperTranscriber, load_wav
+
+    p = tmp_path / "a.wav"
+    with wave.open(str(p), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(struct.pack("<3h", 0, 16384, -32768))
+    arr = load_wav(p)
+    assert arr.dtype == np.float32 and arr.tolist() == [0.0, 0.5, -1.0]
+    monkeypatch.setitem(sys.modules, "av", None)  # any PyAV use would raise ImportError
+
+    seen = {}
+
+    class Model:
+        def transcribe(self, audio, **kw):
+            seen["audio"] = audio
+            return iter([]), type("I", (), {"language": "en", "duration": 0.0})()
+
+    t = WhisperTranscriber("large-v3", "cpu")
+    t._model = Model()
+    assert t.transcribe(p, language="en").language == "en"
+    assert isinstance(seen["audio"], np.ndarray)

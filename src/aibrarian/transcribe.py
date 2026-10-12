@@ -62,7 +62,7 @@ class WhisperTranscriber:
     def transcribe(self, path: Path, language: str | None = None) -> TranscriptResult:
         """``language`` overrides the configured one (None = autodetect)."""
         segs, info = self._load().transcribe(
-            str(path), language=language or self.language, vad_filter=True, beam_size=5,
+            load_wav(path), language=language or self.language, vad_filter=True, beam_size=5,
             word_timestamps=True)
         raw = [
             RawSegment(s.start, s.end, s.text.strip(),
@@ -70,6 +70,27 @@ class WhisperTranscriber:
             for s in segs if s.text.strip()
         ]
         return TranscriptResult(raw, info.language, info.duration)
+
+
+def load_wav(path: Path):
+    """Decode our 16 kHz mono PCM WAV to float32 without PyAV.
+
+    faster-whisper's own ``decode_audio`` calls ``av.open(..., metadata_errors=...)``,
+    which newer PyAV releases reject (TypeError). Handing it a numpy array skips
+    that code path entirely. Anything that is not 16 kHz mono s16 is returned as a
+    path string (faster-whisper decodes it itself)."""
+    import wave
+
+    import numpy as np
+
+    try:
+        with wave.open(str(path), "rb") as w:
+            if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (16000, 1, 2):
+                return str(path)
+            frames = w.readframes(w.getnframes())
+    except (wave.Error, EOFError):
+        return str(path)
+    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
 def chunk_segments(raw: Iterable[RawSegment], target_seconds: float) -> list[Segment]:
