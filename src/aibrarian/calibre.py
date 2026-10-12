@@ -35,6 +35,16 @@ LIBRARY_FILES = {"metadata.db", "metadata_db_prefs_backup.json", "full-text-sear
 BOOK_DIR_FILES = {"metadata.opf", "cover.jpg"}
 
 
+def is_calibre_own_file(name: str, top: bool) -> bool:
+    """Calibre's own bookkeeping / backup files: never orphans (metadata.db*, *.bak*,
+    prefs backup, notes, full-text-search db, hidden files)."""
+    n = name.lower()
+    return (n.startswith(".") or n.startswith("metadata.db") or ".bak" in n
+            or n.startswith("metadata_db_prefs_backup") or n.startswith("full-text-search.db")
+            or n.endswith(".calnotes") or (top and name in LIBRARY_FILES)
+            or (not top and name in BOOK_DIR_FILES))
+
+
 @dataclass
 class CalibreResult:
     cmd: list[str]
@@ -195,6 +205,23 @@ class Calibre:
                         "match": "isbn" if same_isbn else "title+author"}
         return None
 
+    def orphan_files(self, known: set[str] | None = None) -> list[str]:
+        """Files under the library that metadata.db does not reference (read-only).
+        Hidden dirs (``.calnotes``, ``.caltrash``, ``.aibrarian-quarantine``) are skipped."""
+        if known is None:
+            known = {os.path.normpath(f["path"]) for b in self.books() for f in b["formats"]}
+        out = []
+        for dirpath, dirnames, filenames in os.walk(self.library):
+            dirnames[:] = sorted(x for x in dirnames if not x.startswith("."))
+            top = Path(dirpath) == self.library
+            for fn in sorted(filenames):
+                if is_calibre_own_file(fn, top):
+                    continue
+                p = os.path.normpath(os.path.join(dirpath, fn))
+                if p not in known:
+                    out.append(p)
+        return out
+
     def integrity_check(self) -> str:
         with self.connect_ro() as c:
             return "; ".join(r[0] for r in c.execute("PRAGMA integrity_check"))
@@ -237,16 +264,7 @@ class Calibre:
                                                "path": fs[0]["path"],
                                                "note": "changed since ingest (e.g. metadata "
                                                        "embedded by Calibre)"})
-        for dirpath, dirnames, filenames in os.walk(self.library):
-            dirnames[:] = [x for x in dirnames if not x.startswith(".")]
-            top = Path(dirpath) == self.library
-            for fn in filenames:
-                if fn.startswith(".") or (top and fn in LIBRARY_FILES) or \
-                        (not top and fn in BOOK_DIR_FILES):
-                    continue
-                p = os.path.normpath(os.path.join(dirpath, fn))
-                if p not in known:
-                    issues["orphan_files"].append(p)
+        issues["orphan_files"] = self.orphan_files(known)
         n = sum(len(v) for v in issues.values())
         return {"ok": n == 0, "books": len(books), "issue_count": n, "integrity": integ,
                 "issues": issues}

@@ -118,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     ba.add_argument("--json", action="store_true")
     bks.add_parser("validate", help="read-only Calibre check (integrity, logged ingests, "
                    "missing/orphan files); result logged as a validate action")
+    bo = bks.add_parser("adopt-orphans", help="ingest loose files in the Calibre library "
+                        "(orphans from validate) via calibredb, then quarantine the originals "
+                        "(dry run unless --execute)")
+    bo.add_argument("--execute", action="store_true")
+    bo.add_argument("--limit", type=int, help="max folder groups to process")
+    bo.add_argument("--json", action="store_true")
     bu = bks.add_parser("undo", help="reverse book actions by id or run (dry run unless --execute)")
     bu.add_argument("--id", type=int, action="append", help="library_action id (repeatable)")
     bu.add_argument("--run", help="run id, e.g. books-20261012T095000Z or prefect:<id>")
@@ -391,6 +397,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         res = services.books_validate(ctx, progress=_say)
         _print(res)
         return 0 if res["ok"] else 1
+    elif cmd == "books" and args.books_cmd == "adopt-orphans":
+        res = services.books_adopt_orphans(ctx, args.execute, args.limit, progress=_say)
+        if args.json:
+            print(json.dumps(res, indent=2, default=str))
+        if res["run_id"]:
+            print(f"undo: aibrarian books undo --run {res['run_id']}  (dry run; add --execute)")
+        return 1 if res["counts"].get("error") else 0
     elif cmd == "books" and args.books_cmd == "undo":
         if not args.id and not args.run:
             print("give --id N (repeatable) or --run RUN", file=sys.stderr)

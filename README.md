@@ -67,6 +67,7 @@ aibrarian run-action probe --id 42
 aibrarian pipeline                # all stages once, without Prefect
 aibrarian library-scan --max-items 50
 aibrarian book-scan
+aibrarian books adopt-orphans [--limit N] [--execute]   # ingest loose files in /books via calibredb (worker)
 aibrarian apply --domain video --kind movie            # dry-run plan
 aibrarian apply --domain video --kind movie --apply    # actually move
 aibrarian search "space travel" --mode semantic

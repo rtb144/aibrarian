@@ -200,6 +200,12 @@ you go (edit this file, or copy it into Obsidian).
   Done when: a day of runs shows moves/quarantines, no `error` rows, and the books open in
   Calibre/Audiobookshelf. Check the `needs_review` rows (many may be "another filesystem").
 
+- [x] **5.4e Adopt Calibre orphans.** `aibrarian books adopt-orphans` (dry run, `--limit`,
+  `--execute`): loose files in `/books` ingested via calibredb (add / add_format), duplicates and
+  originals quarantined in `/books/.aibrarian-quarantine/`, undo by run.
+  Do: `dc exec aibrarian-worker aibrarian books adopt-orphans`, then `--limit 1 --execute`,
+  check `/library-log/ui`, then the rest; `books validate` should show no orphan_files.
+
 - [ ] **5.5 Repair old orphaned subtitles.**
   Do: `dc exec aibrarian-api aibrarian srt-report --log /data/old-reports/<move_log>.jsonl` then `sync-subtitles --log … --apply`
   Done when: re-running `srt-report` shows fewer `lost_after_move` entries.

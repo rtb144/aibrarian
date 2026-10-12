@@ -390,3 +390,60 @@ def test_book_duplicate_groups(settings):
     assert len(groups) == 1 and groups[0]["count"] == 3
     p = q.plan({"identical": [], "identical_books": groups}, settings)
     assert [i["path"] for i in p["items"]] == [str(drop_copy)] and lib_copy.exists()
+
+
+def test_validate_ignores_calibre_own_files(env):
+    s, lib, drop, runner, cal = env
+    for n in ("metadata.db.bak", "metadata.db.bak2", "metadata_db_prefs_backup.json",
+              "x.bak.epub"):
+        put(lib / n, b"x")
+    put(lib / ".calnotes" / "notes.db", b"x")
+    put(lib / "Ann" / "a.calnotes", b"x")
+    assert cal.orphan_files() == []
+
+
+def test_adopt_orphans_dry_run_execute_undo(env):
+    from aibrarian import adopt
+
+    s, lib, drop, runner, cal = env
+    # existing book "Known" by Ann has EPUB -> loose folder with epub (dup) + azw3 (new fmt)
+    put(lib / "ann" / "Known" / "Known.epub", b"different")
+    put(lib / "ann" / "Known" / "Known.azw3", b"azw")
+    # new title, two formats + cover
+    put(lib / "George R. R. Martin" / "A Clash of Kings" / "A Clash of Kings.azw3", b"c1")
+    put(lib / "George R. R. Martin" / "A Clash of Kings" / "A Clash of Kings.epub", b"c2")
+    put(lib / "George R. R. Martin" / "A Clash of Kings" / "cover.jpg", b"img")
+    put(lib / "metadata.db.bak", b"bak")
+    put(lib / "Stray.epub", b"s")
+    db = BookDB([])
+    before = (lib / "metadata.db").read_bytes()
+    out: list[str] = []
+    res = adopt.adopt_orphans(s, db, calibre=cal, progress=out.append)
+    assert res["dry_run"] and not runner.calls and not db.actions
+    assert (lib / "metadata.db").read_bytes() == before
+    plans = {p["title"]: p for p in res["groups"]}
+    ops = {Path(st["path"]).name: st["op"] for p in plans.values() for st in p["steps"]}
+    assert ops == {"Known.epub": "duplicate", "Known.azw3": "add_format",
+                   "A Clash of Kings.epub": "calibre_add", "A Clash of Kings.azw3": "add_format"}
+    assert plans["Known"]["calibre_id"] == 1 and len(res["skipped"]) == 1
+    assert any("summary" not in x and "DRY RUN groups 2/2" in x for x in out)
+
+    res = adopt.adopt_orphans(s, db, execute=True, limit=5, calibre=cal)
+    rid = res["run_id"]
+    assert rid.startswith("adopt-") and not res["counts"].get("error")
+    acts = [a["action"] for a in db.actions]
+    assert sorted(acts) == ["add_format", "add_format", "calibre_add", "quarantine"]
+    add = next(a for a in db.actions if a["action"] == "calibre_add")
+    assert "Added book ids" in add["details"]["calibre"]["stdout"]
+    assert not (lib / "George R. R. Martin" / "A Clash of Kings").exists()  # moved, not deleted
+    q = lib / adopt.QUARANTINE_DIRNAME
+    assert len(list(q.rglob("*.epub"))) == 2 and list(q.rglob("cover.jpg"))
+    titles = {b["title"]: b for b in cal.books()}
+    assert {f["format"] for f in titles["A Clash of Kings"]["formats"]} == {"EPUB", "AZW3"}
+    assert cal.orphan_files() == [str(lib / "Stray.epub")]
+
+    u = booklib.undo(db.get_library_actions(run_id=rid), s, db, execute=True, calibre=cal)
+    assert u["undone"] == 4
+    assert (lib / "George R. R. Martin" / "A Clash of Kings" / "cover.jpg").exists()
+    assert (lib / "ann" / "Known" / "Known.epub").read_bytes() == b"different"
+    assert any(c[3] == "remove" for c in runner.calls)

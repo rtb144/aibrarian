@@ -195,6 +195,17 @@ def calibre_validate_flow() -> dict:
             "integrity": res.get("integrity")}
 
 
+@flow(name="calibre-adopt-orphans", log_prints=True)
+def calibre_adopt_orphans_flow(execute: bool = False, limit: int | None = None) -> dict:
+    """Manual only (no schedule): ingest loose files in the Calibre library via calibredb,
+    then quarantine the originals. Dry run unless ``execute=True``."""
+    from aibrarian.services import books_adopt_orphans
+
+    res = books_adopt_orphans(ctx(), execute, limit, progress=log.info,
+                              source=f"prefect:{_run_ids()[0]}")
+    return {k: v for k, v in res.items() if k != "groups"}
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -247,6 +258,7 @@ def deployments(group: str) -> list:
            calibre_validate_flow.to_deployment("calibre-validate", cron="41 5 * * *", **one),
            quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one),
+           calibre_adopt_orphans_flow.to_deployment("calibre-adopt-orphans", **one),
            openlibrary_index_flow.to_deployment("openlibrary-index", cron=OL_INDEX_CRON, **one)]
     return {"gpu": gpu, "cpu": cpu, "all": gpu + cpu}[group]
 

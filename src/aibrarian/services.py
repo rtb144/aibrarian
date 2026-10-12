@@ -360,6 +360,14 @@ def books_validate(ctx: Context, progress=None, source: str = "cli") -> dict[str
     return booklib.validate(ctx.settings, ctx.db, source, progress=progress)
 
 
+def books_adopt_orphans(ctx: Context, execute: bool = False, limit: int | None = None,
+                        progress=None, source: str = "cli") -> dict[str, Any]:
+    """Ingest loose files in the Calibre library via calibredb, then quarantine them."""
+    from aibrarian.adopt import adopt_orphans
+
+    return adopt_orphans(ctx.settings, ctx.db, execute, limit, source, progress)
+
+
 def latest_validation(ctx: Context) -> dict[str, Any] | None:
     rows, _ = ctx.db.library_actions(action="validate", limit=1)
     return rows[0] if rows else None

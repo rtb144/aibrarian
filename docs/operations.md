@@ -311,11 +311,26 @@ undo) and to `/data/reports/library-actions.log` (JSONL, outside the quarantine,
 Daily 05:41 UTC (concurrency 1) or `aibrarian books validate` (exit 1 on issues). Read-only:
 sqlite `PRAGMA integrity_check` on a `mode=ro` connection, every logged ingest (book id still
 present, file present, sha256 unchanged), formats missing on disk, orphan files in the
-library. `calibredb check_library` is *not* used because it VACUUMs the DB. The result is a
+library (Calibre's own files are ignored: `metadata.db*`, `*.bak*`,
+`metadata_db_prefs_backup.json`, `*.calnotes`, hidden dirs). `calibredb check_library` is *not* used because it VACUUMs the DB. The result is a
 `validate` action, shown on `/library-log/ui`, `/dashboard` and `GET /library-log/validation`.
 
 Undo: `calibre_add` → source restored, then `calibredb remove`; `add_format` →
 `remove_format`; `copy` → source restored, the copy moved to `<root>/.aibrarian-trash/<date>/`.
+
+### Adopting orphan files (`books adopt-orphans`)
+
+`aibrarian books adopt-orphans [--limit N] [--execute] [--json]` (run in `aibrarian-worker`,
+which has `calibredb`). Takes the validate orphan list, groups it by `<Author>/<Title>/`
+folder and matches Calibre by normalized title + author (read-only sqlite):
+existing book → `add_format` for missing formats, already-present formats are `duplicate`
+(quarantined); no book → `calibre_add` (title/authors from the folder names, EPUB preferred)
+then `add_format`. Only after calibredb succeeds are the loose files (plus leftover
+cover/opf) moved to `/books/.aibrarian-quarantine/<date>/` (manifest.jsonl/tsv; same mount,
+hidden from Calibre). Run id `adopt-<UTC>`; all rows on `/library-log/ui`;
+`aibrarian books undo --run adopt-…` reverses it. Dry run by default. Prefect deployment
+`calibre-adopt-orphans` exists but is manual only (no schedule, `execute=false`).
+`quarantine purge` does not clean `/books/.aibrarian-quarantine`; remove old dates by hand.
 
 ## Open Library reference index (`openlibrary-index`)
 
