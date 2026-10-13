@@ -330,3 +330,28 @@ def test_book_scan_skip_keys_and_error_status(db):
     assert k["applied"] == {"/books/A/a.epub"}
     with db.try_lock(724413) as g1, db.try_lock(724413) as g2:
         assert g1 and not g2
+
+
+def test_book_rescan_candidates_and_in_place_update(db):
+    def sug(path, conf=0.5, decision="review", target="/lib/A/T/x.pdf"):
+        return Suggestion(domain="book", source_path=path, target_path=target, metadata={},
+                          confidence=conf, decision=decision, rationale="r", media_kind="ebook",
+                          op="move")
+    err = db.save_scan_error("book", "/b/err.pdf", "timeout")
+    rev = db.save_suggestion(sug("/b/rev.pdf"))
+    ok = db.save_suggestion(sug("/b/ok.pdf", 0.95, "suggest"))
+    app = db.save_suggestion(sug("/b/app.pdf", 0.4, "reject"))
+    db.set_suggestion_status(app, "applied")
+    ids = {r["id"] for r in db.book_rescan_candidates(["error", "needs_review"], True)}
+    assert ids == {err, rev} and ok not in ids and app not in ids
+    assert db.rescan_suggestion(app, "applied", sug("/b/app.pdf"), {}) is None
+    new = db.rescan_suggestion(err, "error", sug("/b/err.pdf", 0.97, "suggest"),
+                               {"old_status": "error", "old_confidence": 0})
+    assert new == "open"
+    row = db.get_suggestion(err)
+    assert row["status"] == "open" and row["confidence"] == 0.97 and row["id"] == err
+    assert db.rescan_suggestion(err, "error", sug("/b/err.pdf"), {}) is None  # status moved on
+    with db.conn() as c:
+        log = c.execute("SELECT * FROM aib.change_log WHERE op='rescan'").fetchall()
+    assert len(log) == 1 and log[0]["entity_id"] == err
+    assert log[0]["details"]["old_status"] == "error" and log[0]["details"]["new_status"] == "open"

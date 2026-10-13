@@ -171,6 +171,90 @@ def _book_scan(ctx, paths, resume, max_items, flow_run_id, reporter) -> dict[str
     return {"run_id": run_id, **counts}
 
 
+RESCAN_DEFAULT_STATUSES = ("error", "needs_review", "review")
+"""'review' = open suggestions whose decision is review/reject (below book_min_confidence;
+book-scan stores low-confidence items as status 'open'); 'needs_review' is what
+books autoapply sets for low scores / missing title or author; 'error' is a timeout/crash."""
+
+
+def book_rescan(ctx: Context, statuses: list[str] | None = None, execute: bool = False,
+                limit: int | None = None, sample: int = 10, progress=None) -> dict[str, Any]:
+    """Re-run catalog_file for book suggestions with ``statuses`` and update each row in
+    place (same id; change_log op 'rescan' with old->new score/status). Dry run unless
+    ``execute``: count + sample only. Applied suggestions are never touched. Holds the
+    book-scan advisory lock (BOOK_SCAN_LOCK) so it never overlaps a book-scan."""
+    statuses = list(dict.fromkeys(statuses or RESCAN_DEFAULT_STATUSES))
+    bad = [x for x in statuses if x == "applied"]
+    if bad:
+        raise ValueError("applied suggestions are never rescanned")
+    with ctx.db.try_lock(BOOK_SCAN_LOCK) as got:
+        if not got:
+            return {"locked": 1, "message": "book-scan is running (advisory lock 724413 held); "
+                    "try again when it has finished", "execute": execute}
+        rows = ctx.db.book_rescan_candidates([x for x in statuses if x != "review"],
+                                             "review" in statuses, limit)
+        by_status: dict[str, int] = {}
+        for r in rows:
+            k = "review" if r["status"] == "open" else r["status"]
+            by_status[k] = by_status.get(k, 0) + 1
+        res: dict[str, Any] = {"execute": execute, "statuses": statuses, "count": len(rows),
+                               "by_status": by_status,
+                               "sample": [{k: r[k] for k in ("id", "status", "decision",
+                                                             "confidence", "source_path")}
+                                          for r in rows[:sample]]}
+        if not execute:
+            return res
+        res["results"] = _book_rescan(ctx, rows, progress)
+        return res
+
+
+def _book_rescan(ctx: Context, rows: list[dict[str, Any]], progress=None) -> dict[str, Any]:
+    from .olindex import make_ref_lookup
+    from .timeouts import ItemTimeout, alarm, env_seconds, run_in_subprocess
+
+    s = ctx.settings
+    say = progress or (lambda m: None)
+    extract_t = env_seconds("AIB_BOOK_EXTRACT_TIMEOUT_S", 120)
+    file_t = env_seconds("AIB_BOOK_FILE_TIMEOUT_S", 600)
+    ref = make_ref_lookup(s)
+    ol = (lambda t, a, i: ref(t, a, [i] if i else [])) if ref else make_ol_lookup(ctx.db)
+    run_id = ctx.db.start_run("book", {"rescan": len(rows)}, None)
+    counts = {"updated": 0, "missing": 0, "errors": 0, "skipped_changed": 0}
+    changes: dict[str, int] = {}
+
+    def extract(path: Path) -> dict[str, Any]:
+        return run_in_subprocess(books.extract_metadata, (path,), extract_t)
+
+    for n, r in enumerate(rows, 1):
+        p = Path(r["source_path"])
+        if not p.is_file():
+            counts["missing"] += 1
+            say(f"[{n}/{len(rows)}] missing, left as is: {p}")
+            continue
+        try:
+            with alarm(file_t):
+                sug = books.catalog_file(p, s, ctx.ollama, ol_lookup=ol, run_id=run_id,
+                                         ref_lookup=ref, extract=extract)
+        except (ItemTimeout, RuntimeError, OSError) as exc:
+            counts["errors"] += 1
+            say(f"[{n}/{len(rows)}] still failing ({exc}); left as {r['status']}: {p}")
+            continue
+        details = {"old_status": r["status"], "old_decision": r["decision"],
+                   "old_confidence": r["confidence"], "new_decision": sug.decision,
+                   "new_confidence": sug.confidence, "run_id": run_id}
+        new = ctx.db.rescan_suggestion(r["id"], r["status"], sug, details)
+        if new is None:
+            counts["skipped_changed"] += 1
+            continue
+        counts["updated"] += 1
+        key = f"{r['status']}->{new}/{sug.decision}"
+        changes[key] = changes.get(key, 0) + 1
+        say(f"[{n}/{len(rows)}] #{r['id']} {r['status']} {r['confidence']} -> {new}/"
+            f"{sug.decision} {sug.confidence}: {p.name}")
+    ctx.db.finish_run(run_id, counts | {"changes": changes})
+    return {"run_id": run_id, **counts, "changes": changes}
+
+
 def _allowed_roots(ctx: Context) -> list[Path]:
     s = ctx.settings
     return [s.media_root, s.calibre_dir, s.audiobooks_dir, s.podcasts_dir]

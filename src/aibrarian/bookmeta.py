@@ -160,7 +160,7 @@ def evaluate(sug: dict[str, Any], ref_lookup=None) -> dict[str, Any]:
         from .olindex import isbn13, isbns_in_name, opf_isbns
 
         isbns = [i for i in [isbn13(emb.get("isbn"))] + opf_isbns(src) + isbns_in_name(src.name)
-                 if i]
+                 + [isbn13(x) for x in emb.get("content_isbns") or []] if i]
         q_title = clean_title(raw_title or cls.get("title"))["title"]
         try:
             hit = ref_lookup(q_title, emb.get("author") or cls.get("author"),

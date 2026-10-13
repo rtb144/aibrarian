@@ -129,6 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--run", help="run id, e.g. books-20261012T095000Z or prefect:<id>")
     bu.add_argument("--execute", action="store_true")
 
+    br = bks.add_parser("rescan", help="re-catalog error / low-confidence book suggestions in "
+                        "place (dry run unless --execute; holds the book-scan lock)")
+    br.add_argument("--status", action="append", help="error | needs_review | review (open, "
+                    "decision review/reject) | open | failed ...; repeatable. Default: error, "
+                    "needs_review, review")
+    br.add_argument("--execute", action="store_true")
+    br.add_argument("--limit", type=int)
+    br.add_argument("--json", action="store_true")
+
     rj = sub.add_parser("reject", help="dismiss suggestions by id")
     rj.add_argument("--id", type=int, action="append", required=True)
 
@@ -481,6 +490,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         res = services.book_autoapply(ctx, args.execute, args.limit, progress=_say)
         print(json.dumps(res, indent=2, default=str) if args.json else format_result(res), end="")
+    elif cmd == "books" and args.books_cmd == "rescan":
+        if "applied" in (args.status or []):
+            print("applied suggestions are never rescanned", file=sys.stderr)
+            return 2
+        res = services.book_rescan(ctx, args.status, args.execute, args.limit, progress=_say)
+        if args.json:
+            print(json.dumps(res, indent=2, default=str))
+        elif res.get("locked"):
+            print(res["message"], file=sys.stderr)
+        else:
+            print(f"{'rescan' if args.execute else 'would rescan (dry run, add --execute)'}: "
+                  f"{res['count']} book suggestions {res['by_status']} statuses={res['statuses']}")
+            for it in res["sample"]:
+                print(f"  #{it['id']} {it['status']}/{it['decision']} {it['confidence']} "
+                      f"{it['source_path']}")
+            if res.get("results"):
+                print(json.dumps(res["results"], default=str))
+        if res.get("locked"):
+            return 3
+        return 1 if res.get("results", {}).get("errors") else 0
     elif cmd == "books" and args.books_cmd == "validate":
         res = services.books_validate(ctx, progress=_say)
         _print(res)

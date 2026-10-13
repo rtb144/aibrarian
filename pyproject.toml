@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 transcribe = ["faster-whisper>=1.1", "numpy>=1.26"]
 flows = ["prefect>=3.0,<4"]
-media = ["mutagen>=1.47", "pypdf>=4.0", "deltalake>=1.0", "pyarrow>=17"]
+media = ["mutagen>=1.47", "pypdf>=4.0", "pymupdf>=1.24", "deltalake>=1.0", "pyarrow>=17"]
 dev = ["pytest>=8", "ruff>=0.6", "numpy>=1.26"]
 
 [project.scripts]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from importlib import resources
@@ -892,6 +893,42 @@ class Database:
         dst = {scan_key(r["target_path"]) for r in rows
                if r["target_path"] and r["status"] == "applied"}
         return {"suggested": src, "applied": dst}
+
+    def book_rescan_candidates(self, statuses: Sequence[str], review_open: bool,
+                               limit: int | None = None) -> list[dict[str, Any]]:
+        """Book suggestions to re-catalog: rows with one of ``statuses`` plus (``review_open``)
+        open rows whose decision is review/reject (low confidence). Never applied ones."""
+        with self.conn() as c:
+            return c.execute(
+                "SELECT id, source_path, status, decision, confidence, media_kind, rationale "
+                "FROM aib.suggestion WHERE domain='book' AND status <> 'applied' AND "
+                "(status = ANY(%s) OR (%s AND status='open' AND decision IN ('review','reject'))) "
+                "ORDER BY id LIMIT %s", (list(statuses), review_open, limit)).fetchall()
+
+    def rescan_suggestion(self, sid: int, old_status: str, s: Suggestion,
+                          details: dict[str, Any]) -> str | None:
+        """Overwrite suggestion ``sid`` in place with a fresh catalog result (same id) and
+        log old->new in aib.change_log (op 'rescan') in the same transaction. Returns the
+        new status, or None if the row changed meanwhile (e.g. got applied)."""
+        noop = is_noop(s.source_path, s.target_path, s.op)
+        op, status = ("none", "noop") if noop else (s.op, "open")
+        with self.conn() as c:
+            r = c.execute(
+                """UPDATE aib.suggestion SET target_path=%s, metadata=%s, confidence=%s,
+                     decision=%s, rationale=%s, media_kind=%s, op=%s, status=%s
+                   WHERE id=%s AND status=%s AND status <> 'applied' RETURNING id""",
+                (s.target_path, _dumps(s.metadata), s.confidence, s.decision, s.rationale,
+                 s.media_kind, op, status, sid, old_status)).fetchone()
+            if r is None:
+                c.rollback()
+                return None
+            c.execute("INSERT INTO aib.change_log (actor, txn_id, op, entity, entity_id, old_path, "
+                      "new_path, status, finished_at, details) VALUES "
+                      "('cli', %s, 'rescan', 'suggestion', %s, %s, %s, 'committed', now(), %s)",
+                      (f"rescan-{sid}-{int(time.time())}", sid, s.source_path, s.target_path,
+                       _dumps(details | {"new_status": status})))
+            c.commit()
+        return status
 
     def save_scan_error(self, domain: str, source_path: str, error: str,
                         run_id: int | None = None) -> int:

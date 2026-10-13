@@ -549,6 +549,31 @@ by the API (`job="aibrarian-api"`); worker endpoints `:9108`/`:9109` expose only
 via prometheus_client multiprocess mode (`PROMETHEUS_MULTIPROC_DIR=/tmp/aib-prom-multiproc` in the
 worker containers, wiped at worker start). Don't set that variable on the API.
 
+### PDF reading, content scan and `books rescan`
+
+PDFs are read with PyMuPDF (`fitz`: info dict title/author/subject/keywords + page count);
+its C xref repair is fast on files whose broken xref tables made pypdf rebuild for minutes
+(`Ignoring wrong pointing object N 0`). pypdf is only a fallback (pymupdf missing or raising)
+and its loggers are set to ERROR.
+
+When embedded metadata is weak (no title, a filename/garbage title such as
+`Microsoft Word - x.doc`, `untitled`, digits, a scanner name; no author; no ISBN) the first
+10 + last 2 pages (PDF) or the first 6 + last 2 spine documents (EPUB) are scanned:
+checksum-valid ISBN-10/13 (labelled / copyright page preferred, audio/CD/DVD/large-print
+labels last), title = largest font on pages 1-3, author from `by <Name>`. Stored in the
+embedded metadata as `content_isbn`, `content_isbns`, `content_title`, `content_author`,
+`content_scan`, `weak_metadata`; the ISBN feeds the Open Library lookup when there is none
+embedded, and a 1500-char snippet of the title/copyright pages goes into the LLM prompt (not
+stored). Budget `AIB_BOOK_CONTENT_SCAN_S` (default 15s), max 200k chars; mobi/azw3/cbr/cbz
+are skipped.
+
+`aibrarian books rescan [--status S ...] [--limit N] [--execute]` re-catalogs book
+suggestions in place (same id) - default statuses `error`, `needs_review` and `review`
+(= status `open` with decision review/reject). Dry run prints count + sample. Each update
+writes a change_log row (op `rescan`, details old/new status, decision, confidence). Applied
+suggestions are never touched. It takes the book-scan advisory lock 724413 and exits with
+code 3 and a message if a book-scan is running.
+
 ### book-scan robustness
 
 - One run at a time: deployment concurrency 1 / CANCEL_NEW **and** a Postgres advisory lock

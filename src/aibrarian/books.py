@@ -12,6 +12,8 @@ suggestion with a decision from the confidence thresholds:
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -78,13 +80,51 @@ def epub_metadata(path: Path) -> dict[str, Any]:
             "year": int(date[:4]) if date and date[:4].isdigit() else None}
 
 
-def pdf_metadata(path: Path) -> dict[str, Any]:
+def quiet_pypdf() -> None:
+    """pypdf logs 'Ignoring wrong pointing object N 0 (offset 0)' once per object on PDFs
+    with broken xref tables - thousands of lines per file. Only errors get through."""
+    for name in ("pypdf", "pypdf._reader", "pypdf.generic", "pypdf._page"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
+quiet_pypdf()
+
+
+def _pymupdf_metadata(path: Path) -> dict[str, Any]:
+    import fitz  # pymupdf: C xref repair, fast even on broken PDFs
+
+    with fitz.open(str(path)) as doc:
+        info = doc.metadata or {}
+        pages = doc.page_count
+    return clean_metadata({"title": info.get("title"), "author": info.get("author"),
+                           "subject": info.get("subject"), "keywords": info.get("keywords"),
+                           "pages": str(pages) if pages else None,
+                           "pdf_reader": "pymupdf"})
+
+
+def _pypdf_metadata(path: Path) -> dict[str, Any]:
     try:
         from pypdf import PdfReader
     except ImportError:
         return {}
-    info = PdfReader(str(path)).metadata or {}
-    return clean_metadata({"title": info.get("/Title"), "author": info.get("/Author")})
+    quiet_pypdf()
+    reader = PdfReader(str(path))
+    info = reader.metadata or {}
+    return clean_metadata({"title": info.get("/Title"), "author": info.get("/Author"),
+                           "subject": info.get("/Subject"), "keywords": info.get("/Keywords"),
+                           "pdf_reader": "pypdf"})
+
+
+def pdf_metadata(path: Path) -> dict[str, Any]:
+    """PDF info dict + page count via PyMuPDF; pypdf only if pymupdf is missing or raises."""
+    try:
+        return _pymupdf_metadata(path)
+    except ImportError:
+        pass
+    except Exception as exc:
+        out = _pypdf_metadata(path)
+        return out | {"pymupdf_error": str(exc)[:300]}
+    return _pypdf_metadata(path)
 
 
 def clean_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -101,7 +141,12 @@ def clean_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def extract_metadata(path: Path) -> dict[str, Any]:
+def extract_metadata(path: Path, content_scan: bool = True) -> dict[str, Any]:
+    """Embedded metadata; when it is weak (see contentscan.weak_reasons) the book's own
+    first/last pages are scanned too (content_isbn / content_title / content_author /
+    content_snippet, capped by AIB_BOOK_CONTENT_SCAN_S, default 15s)."""
+    from . import contentscan
+
     kind = media_type(path)
     meta: dict[str, Any] = {"filename": path.name, "media_type": kind}
     try:
@@ -116,7 +161,28 @@ def extract_metadata(path: Path) -> dict[str, Any]:
             meta |= clean_metadata({k: meta.get(k) for k in ("title", "author")})
     except Exception as exc:  # corrupt files still get filename-based handling
         meta["extract_error"] = str(exc)
+    if content_scan and path.suffix.lower() in (".pdf", ".epub"):
+        weak = contentscan.weak_reasons(meta)
+        if weak:
+            try:
+                budget = float(os.environ.get("AIB_BOOK_CONTENT_SCAN_S") or 15)
+            except ValueError:
+                budget = 15.0
+            meta |= contentscan.scan(path, budget) | {"weak_metadata": weak}
     return {k: v for k, v in meta.items() if v not in (None, "")}
+
+
+def lookup_fields(meta: dict[str, Any]) -> dict[str, Any]:
+    """Title/author/isbn to look up: embedded values, with the content scan filling in a
+    missing ISBN and replacing a missing/garbage title or a missing author."""
+    from .contentscan import title_is_garbage
+
+    title, author = meta.get("title"), meta.get("author")
+    if meta.get("content_title") and (not title or title_is_garbage(title, meta.get("filename"))):
+        title = meta["content_title"]
+    if meta.get("content_author") and (not author or title_is_garbage(author)):
+        author = meta["content_author"]
+    return {"title": title, "author": author, "isbn": meta.get("isbn") or meta.get("content_isbn")}
 
 
 def google_books(title: str | None, author: str | None, isbn: str | None,
@@ -154,13 +220,15 @@ def reconcile(meta: dict[str, Any], ref: dict[str, Any] | None) -> float:
     return round(t * 0.85, 3)
 
 
-def classify(ollama: OllamaClient, path: Path, meta: dict[str, Any]) -> dict[str, Any]:
+def classify(ollama: OllamaClient, path: Path, meta: dict[str, Any],
+             snippet: str | None = None) -> dict[str, Any]:
     prompt = (
         "Classify this file for a home library. Return one JSON object matching the schema.\n"
         f"Schema: {CLASSIFY_SCHEMA}\nRules: ebook for epub/pdf/mobi books; audiobook for "
         "narrated books (m4b, multi-part mp3 in a book folder); podcast for episodic shows; "
         "use null when unknown, never invent authors.\n"
         f"PATH: {path}\nMETADATA: {meta}"
+        + (f"\nTEXT FROM THE BOOK (title/copyright pages):\n{snippet[:1500]}" if snippet else "")
     )
     try:
         out = ollama.generate_json(prompt, CLASSIFY_SCHEMA)
@@ -201,20 +269,21 @@ def decide(conf: float, s: Settings) -> Decision:
 def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
                  ol_lookup=None, gb_lookup=google_books, run_id: int | None = None,
                  ref_lookup=None, extract=None) -> Suggestion:
-    meta = (extract or extract_metadata)(path)
+    meta = dict((extract or extract_metadata)(path))
+    snippet = meta.pop("content_snippet", None)  # prompt only, not stored
+    lk = lookup_fields(meta)
     ref = None
     if ol_lookup is not None:
-        ref = ol_lookup(meta.get("title"), meta.get("author"), meta.get("isbn"))
+        ref = ol_lookup(lk["title"], lk["author"], lk["isbn"])
     if ref is None:
-        ref = gb_lookup(meta.get("title"), meta.get("author"), meta.get("isbn"),
-                        s.google_books_api_key)
-    ref_score = reconcile(meta, ref)
+        ref = gb_lookup(lk["title"], lk["author"], lk["isbn"], s.google_books_api_key)
+    ref_score = reconcile({**meta, "title": lk["title"], "author": lk["author"]}, ref)
     if meta.get("media_type") == "ebook" and ref_score >= s.book_min_confidence:
-        cls = {"kind": "ebook", "title": ref.get("title") or meta.get("title"),
-               "author": ref.get("author") or meta.get("author"), "series": None,
+        cls = {"kind": "ebook", "title": ref.get("title") or lk["title"],
+               "author": ref.get("author") or lk["author"], "series": None,
                "confidence": ref_score, "notes": f"matched {ref.get('source')}"}
     else:
-        cls = classify(ollama, path, {**meta, "reference": ref})
+        cls = classify(ollama, path, {**meta, "reference": ref}, snippet)
         if ref_score:
             cls["confidence"] = round(max(cls["confidence"], (cls["confidence"] + ref_score) / 2), 3)
     # confidence is evidence-based (bookmeta.score), not the LLM's self-rating
