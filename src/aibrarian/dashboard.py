@@ -329,3 +329,55 @@ document.getElementById('f').onsubmit=async e=>{e.preventDefault();
   (i+1)+'</td><td>'+esc(x.title)+'</td><td>'+t(x.start)+'</td><td>'+x.score+'</td><td>'+
   esc((x.text||'').slice(0,300))+'</td></tr>').join('')+'</table>')+'</div>').join('')};
 </script></body></html>"""
+
+
+TRANSCRIPT_LANG_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian · transcript languages</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:1.5em;background:#111;color:#ddd}
+table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #333;padding:4px 6px;
+vertical-align:top;text-align:left}th{background:#222}.snip{color:#aaa;max-width:40em}
+.flag{background:#533;border-radius:3px;padding:0 4px;margin-right:3px;font-size:12px}
+button{cursor:pointer}.ok{color:#7c7}.bad{color:#e77}input,select{background:#222;color:#ddd}
+.path{color:#777;font-size:11px}</style></head><body>
+<h2>Transcript language check</h2>
+<p id="counts"></p>
+<p>Show <select id="flt"><option value="flagged">needs review</option>
+<option value="nonen">non-English only</option><option value="all">all</option></select>
+review <select id="rev"><option value="">any</option><option value="none" selected>not reviewed</option>
+<option value="correct">correct</option><option value="wrong">wrong</option></select>
+<input id="q" placeholder="title / path"> <button onclick="load()">reload</button></p>
+<p style="color:#999">&#10003; correct = the transcript really is non-English (foreign film) /
+fine. &#10007; wrong = bad transcription (misdetected language, hallucination).
+Nothing is changed on disk.</p>
+<table><thead><tr><th>title</th><th>detected</th><th>conf</th><th>whisper</th><th>flags</th>
+<th>snippet</th><th>review</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function load(){
+  const f=document.getElementById('flt').value,p=new URLSearchParams();
+  p.set('flagged',f==='flagged');p.set('non_english',f==='nonen');
+  const r=document.getElementById('rev').value;if(r)p.set('review',r);
+  const q=document.getElementById('q').value;if(q)p.set('q',q);p.set('limit',500);
+  const d=await (await fetch('/transcripts/lang?'+p)).json(),c=d.counts||{};
+  document.getElementById('counts').textContent=`${c.total||0} checked, ${c.needs_review||0} need review,
+ ${c.non_english||0} non-English, ${c.correct||0} marked correct, ${c.wrong||0} wrong; showing ${d.items.length}
+ of ${d.total}; last check ${c.checked_at||'never'}`;
+  document.getElementById('rows').innerHTML=d.items.map(i=>`<tr>
+<td>${esc(i.title)}<div class="path">${esc(i.path)}</div></td><td>${esc(i.detected_lang)}</td>
+<td>${i.confidence==null?'':i.confidence.toFixed(2)}</td><td>${esc(i.stored_lang)}</td>
+<td>${(i.flags||[]).map(x=>`<span class="flag">${esc(x)}</span>`).join('')}
+${i.repeat_ratio?`<div class="path">repeat ${(i.repeat_ratio*100).toFixed(0)}%</div>`:''}</td>
+<td class="snip">${esc(i.snippet)}</td>
+<td>${i.review?`<b class="${i.review==='correct'?'ok':'bad'}">${i.review}</b>
+<button onclick="mark(${i.id},null)">undo</button>`:
+`<button onclick="mark(${i.id},'correct')">&#10003; correct</button>
+<button onclick="mark(${i.id},'wrong')">&#10007; wrong</button>`}</td></tr>`).join('');
+}
+async function mark(id,review){
+  const r=await fetch(`/transcripts/lang/${id}/review`,{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({review})});
+  if(!r.ok)alert(await r.text());load();
+}
+load();
+</script></body></html>"""

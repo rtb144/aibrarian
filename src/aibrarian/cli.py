@@ -222,6 +222,15 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("--force", action="store_true")
 
     sub.add_parser("prefect-limits", help="create tag concurrency limits in Prefect")
+    tr = sub.add_parser("transcripts", help="transcript checks (read-only)")
+    trs = tr.add_subparsers(dest="tr_cmd", required=True)
+    tlc = trs.add_parser("langcheck", help="detect non-English / garbage transcripts; writes "
+                         "langcheck.json + .csv to REPORT_DIR (never touches media/transcripts)")
+    tlc.add_argument("--limit", type=int, help="max transcripts to check")
+    tlc.add_argument("--out", type=Path, help="report dir, or a .json/.csv file path")
+    tlc.add_argument("--no-store", action="store_true", help="do not save into aib.transcript_lang")
+    tlc.add_argument("--no-db", action="store_true", help="sidecars only (skip DB-only transcripts)")
+    tlc.add_argument("--json", action="store_true", help="print the summary as JSON")
     return p
 
 
@@ -473,6 +482,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         ctx.db.migrate()
         import_dump(args.dump, s.database_url, args.batch_lines, args.truncate)
+    elif cmd == "transcripts" and args.tr_cmd == "langcheck":
+        from . import langcheck
+
+        res = langcheck.run(ctx, args.limit, args.out, store=not args.no_store,
+                            include_db=not args.no_db, progress=_say)
+        if args.json:
+            _print(res["summary"])
+        else:
+            print(langcheck.format_summary(res), end="")
     elif cmd == "openlibrary-lookup":
         from .openlibrary import lookup
 

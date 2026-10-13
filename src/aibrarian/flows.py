@@ -206,6 +206,15 @@ def calibre_adopt_orphans_flow(execute: bool = False, limit: int | None = None) 
     return {k: v for k, v in res.items() if k != "groups"}
 
 
+@flow(name="transcript-langcheck", log_prints=True)
+def transcript_langcheck_flow(limit: int | None = None) -> dict:
+    """Read-only: detect non-English / repetitive transcripts, write langcheck.json/.csv
+    and refresh aib.transcript_lang (manual reviews are kept). Never touches media."""
+    from aibrarian import langcheck
+
+    return langcheck.run(ctx(), limit, progress=log.info)["summary"]
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -237,6 +246,7 @@ def openlibrary_index_flow(rebuild: bool = False) -> dict:
 # One run at a time per deployment; a scheduled run that would overlap a
 # still-running one is cancelled instead of piling up.
 OL_INDEX_CRON = "15 1 * * 6"  # weekly, Saturday 01:15 UTC; skips when the Delta is unchanged
+LANGCHECK_CRON = "20 2 * * *"  # nightly 02:20; read-only, cheap (CPU, no GPU)
 SINGLE_RUN = ConcurrencyLimitConfig(limit=1, collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW)
 
 
@@ -257,6 +267,8 @@ def deployments(group: str) -> list:
            book_autoapply_flow.to_deployment("book-autoapply", cron="50 * * * *", **one),
            calibre_validate_flow.to_deployment("calibre-validate", cron="41 5 * * *", **one),
            quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
+           transcript_langcheck_flow.to_deployment("transcript-langcheck",
+                                                   cron=LANGCHECK_CRON, **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one),
            calibre_adopt_orphans_flow.to_deployment("calibre-adopt-orphans", **one),
            openlibrary_index_flow.to_deployment("openlibrary-index", cron=OL_INDEX_CRON, **one)]

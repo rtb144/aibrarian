@@ -11,10 +11,10 @@ def test_scheduled_deployments_cannot_overlap():
                          "retry-failed", "openlibrary-import", "reprobe", "duplicates",
                          "dedup-quarantine", "quarantine-purge", "book-autoapply",
                          "calibre-validate", "openlibrary-index",
-                         "calibre-adopt-orphans"}
+                         "calibre-adopt-orphans", "transcript-langcheck"}
     for name in ("media-pipeline", "discover", "library-scan", "book-scan",
                  "dedup-quarantine", "quarantine-purge", "book-autoapply",
-                 "calibre-validate", "openlibrary-index"):
+                 "calibre-validate", "openlibrary-index", "transcript-langcheck"):
         cl = deps[name].concurrency_limit
         limit = getattr(cl, "limit", cl)
         strategy = (getattr(cl, "collision_strategy", None)
@@ -74,7 +74,8 @@ def test_flows_importable_as_script(tmp_path):
                             ("book_scan_flow", "book-scan"),
                             ("calibre_validate_flow", "calibre-validate"),
                             ("calibre_adopt_orphans_flow", "calibre-adopt-orphans"),
-                            ("openlibrary_index_flow", "openlibrary-index")):
+                            ("openlibrary_index_flow", "openlibrary-index"),
+                            ("transcript_langcheck_flow", "transcript-langcheck")):
         code = ("from prefect.flows import load_flow_from_entrypoint as l;"
                 f"print(l('{f}:{name}').name)")
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
@@ -85,3 +86,8 @@ def test_flows_importable_as_script(tmp_path):
 def test_adopt_orphans_deployment_is_manual():
     deps = {d.name: d for d in flows.deployments("all")}
     assert not deps["calibre-adopt-orphans"].schedules
+
+
+def test_langcheck_deployment_nightly():
+    deps = {d.name: d for d in flows.deployments("cpu")}
+    assert deps["transcript-langcheck"].schedules

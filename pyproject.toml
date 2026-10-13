@@ -18,6 +18,7 @@ dependencies = [
   "psycopg[binary,pool]>=3.2",
   "rapidfuzz>=3.9",
   "prometheus-client>=0.20",
+  "langdetect>=1.0.9",  # transcript language check (pure Python, offline)
 ]
 
 [project.optional-dependencies]

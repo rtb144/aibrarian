@@ -554,6 +554,72 @@ class Database:
                 "SELECT * FROM aib.segment WHERE media_id=%s ORDER BY seq", (media_id,)
             ).fetchall()
 
+    # -- transcript language check (aib.transcript_lang) ------------------
+    def transcribed_media_for_langcheck(self) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute(
+                "SELECT m.id, m.path, m.title, t.language FROM aib.media_file m "
+                "JOIN aib.transcript t ON t.media_id = m.id WHERE NOT m.missing").fetchall()
+
+    def save_langcheck(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Upsert results; a previous manual review is kept."""
+        cols = ("path", "media_id", "title", "source", "detected_lang", "confidence",
+                "stored_lang", "mismatch", "non_english", "repetitive", "repeat_ratio",
+                "top_line_share", "segments", "flags", "needs_review", "snippet")
+        sql = (f"INSERT INTO aib.transcript_lang ({', '.join(cols)}, checked_at) VALUES "
+               f"({', '.join(['%s'] * len(cols))}, now()) ON CONFLICT (path) DO UPDATE SET "
+               + ", ".join(f"{k}=EXCLUDED.{k}" for k in cols[1:]) + ", checked_at=now()")
+        with self.conn() as c:
+            with c.cursor() as cur:
+                cur.executemany(sql, [tuple(
+                    bool(r.get(k)) if k in ("mismatch", "non_english", "repetitive",
+                                            "needs_review")
+                    else list(r.get(k) or []) if k == "flags" else r.get(k) for k in cols)
+                    for r in rows])
+            c.commit()
+        return len(rows)
+
+    def langcheck_list(self, flagged: bool = True, non_english: bool = False,
+                       review: str | None = None, q: str | None = None,
+                       limit: int = 200, offset: int = 0) -> dict[str, Any]:
+        where, args = [], []
+        if flagged:
+            where.append("needs_review")
+        if non_english:
+            where.append("non_english")
+        if review == "none":
+            where.append("review IS NULL")
+        elif review:
+            where.append("review = %s")
+            args.append(review)
+        if q:
+            where.append("(title ILIKE %s OR path ILIKE %s)")
+            args += [f"%{q}%", f"%{q}%"]
+        w = ("WHERE " + " AND ".join(where)) if where else ""
+        with self.conn() as c:
+            total = c.execute(f"SELECT count(*) AS n FROM aib.transcript_lang {w}",
+                              args).fetchone()["n"]
+            items = c.execute(
+                f"SELECT * FROM aib.transcript_lang {w} ORDER BY review NULLS FIRST, "
+                "detected_lang, title LIMIT %s OFFSET %s", [*args, limit, offset]).fetchall()
+            counts = c.execute(
+                "SELECT count(*) AS total, count(*) FILTER (WHERE needs_review) AS needs_review, "
+                "count(*) FILTER (WHERE non_english) AS non_english, "
+                "count(*) FILTER (WHERE review='correct') AS correct, "
+                "count(*) FILTER (WHERE review='wrong') AS wrong, max(checked_at) AS checked_at "
+                "FROM aib.transcript_lang").fetchone()
+        return {"total": total, "counts": counts, "items": items}
+
+    def langcheck_review(self, item_id: int, review: str | None,
+                         note: str | None = None) -> dict[str, Any] | None:
+        with self.conn() as c:
+            row = c.execute(
+                "UPDATE aib.transcript_lang SET review=%s, review_note=%s, "
+                "reviewed_at=CASE WHEN %s::text IS NULL THEN NULL ELSE now() END "
+                "WHERE id=%s RETURNING *", (review, note, review, item_id)).fetchone()
+            c.commit()
+        return row
+
     def keyword_search(self, query: str, limit: int = 20,
                        media_id: int | None = None) -> list[dict[str, Any]]:
         """Trigram fuzzy + full-text search over segments (old catalog_db.search_text)."""

@@ -30,6 +30,7 @@ from .dashboard import (
     EMBED_EVAL_UI_HTML,
     LIBRARY_LOG_UI_HTML,
     SEARCH_UI_HTML,
+    TRANSCRIPT_LANG_UI_HTML,
 )
 from .metrics import SUGGESTIONS_OPEN, refresh_stage_gauges
 from .status import ACTIONS, Stage
@@ -45,6 +46,11 @@ class ClipRequest(BaseModel):
     rel_path: str | None = None
     match_index: int = 0
     padding: float | None = None
+
+
+class LangReview(BaseModel):
+    review: str | None = None  # 'correct' | 'wrong' | null (clear)
+    note: str | None = None
 
 
 class BookScanRequest(BaseModel):
@@ -422,6 +428,29 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
             return services.reject_suggestion(c(), sid)
         except KeyError as exc:
             raise HTTPException(404, "suggestion not found") from exc
+
+    # -- transcript language check (read-only on media) -------------------
+    @app.get("/transcripts/lang")
+    def transcript_lang(flagged: bool = True, non_english: bool = False,
+                        review: str | None = Query(None, pattern="^(none|correct|wrong)$"),
+                        q: str | None = None, limit: int = Query(200, ge=1, le=2000),
+                        offset: int = Query(0, ge=0)):
+        """Results of the last `transcripts langcheck` run (aib.transcript_lang)."""
+        return c().db.langcheck_list(flagged, non_english, review, q, limit, offset)
+
+    @app.post("/transcripts/lang/{item_id}/review")
+    def transcript_lang_review(item_id: int, body: LangReview):
+        """Record Tom's verdict; only the DB row changes, never the transcript."""
+        if body.review not in (None, "correct", "wrong"):
+            raise HTTPException(422, "review must be 'correct', 'wrong' or null")
+        row = c().db.langcheck_review(item_id, body.review, body.note)
+        if not row:
+            raise HTTPException(404, "no such langcheck item")
+        return row
+
+    @app.get("/transcripts/lang/ui", response_class=HTMLResponse)
+    def transcript_lang_ui() -> str:
+        return TRANSCRIPT_LANG_UI_HTML
 
     # -- open library ------------------------------------------------------
     @app.get("/openlibrary/lookup")
