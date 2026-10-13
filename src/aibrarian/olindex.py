@@ -310,7 +310,8 @@ def _get(c, k: str, default: Any = None) -> Any:
 
 
 def build_index(delta_dir: Path, out: Path, batch_size: int = 50_000, rebuild: bool = False,
-                log: Callable[[str], None] = print, tables: Iterable[str] = TABLES) -> dict:
+                log: Callable[[str], None] = print, tables: Iterable[str] = TABLES,
+                reporter: Any = None) -> dict:
     """Stream the Delta tables into ``out`` (via ``out.building``, then atomic rename).
 
     Skips the build when the finished index was built from the same Delta versions
@@ -343,7 +344,7 @@ def build_index(delta_dir: Path, out: Path, batch_size: int = 50_000, rebuild: b
     if not tmp.exists():
         c = _connect(tmp, build=True)
     try:
-        return _build(c, tmp, out, tables, sets, versions, batch_size, log)
+        return _build(c, tmp, out, tables, sets, versions, batch_size, log, reporter)
     except BaseException:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -351,11 +352,12 @@ def build_index(delta_dir: Path, out: Path, batch_size: int = 50_000, rebuild: b
         raise
 
 
-def _build(c, tmp, out, tables, sets, versions, batch_size, log) -> dict:
+def _build(c, tmp, out, tables, sets, versions, batch_size, log, reporter=None) -> dict:
     c.executescript(SCHEMA)
     _set(c, "delta_versions", versions)
     _set(c, "build_started_at", _get(c, "build_started_at") or datetime.now(UTC).isoformat())
     t0 = time.monotonic()
+    rows_done = files_done = 0
     for t in tables:
         ds = sets[t]
         names = set(ds.schema.names)
@@ -382,6 +384,11 @@ def _build(c, tmp, out, tables, sets, versions, batch_size, log) -> dict:
                                  "at": datetime.now(UTC).isoformat()})
             c.execute("COMMIT")
             total += n
+            rows_done += n
+            files_done += 1
+            if reporter:
+                reporter.tick(current=f"{t} file {k}/{len(frags)}", files=files_done,
+                              rows=rows_done)
             el = time.monotonic() - t0
             log(f"{t}: file {k}/{len(frags)} rows={n:,} ({n / max(time.monotonic() - ft, 1e-6):,.0f}/s)"
                 f" table_total={total:,} elapsed={el / 60:.1f} min")

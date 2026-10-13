@@ -166,7 +166,8 @@ def _title_from_path(p: Path) -> str:
 # --- run --------------------------------------------------------------------
 
 def run(ctx, limit: int | None = None, out: Path | None = None, store: bool = True,
-        include_db: bool = True, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+        include_db: bool = True, progress: Callable[[str], None] | None = None,
+        reporter: Any = None) -> dict[str, Any]:
     """Check every transcript, write ``langcheck.json`` + ``langcheck.csv``."""
     s = ctx.settings
     say = progress or (lambda _m: None)
@@ -182,7 +183,11 @@ def run(ctx, limit: int | None = None, out: Path | None = None, store: bool = Tr
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     errors = 0
+    if reporter:
+        reporter.start()
     for p in iter_sidecars(s.transcribe_paths()):
+        if reporter:
+            reporter.tick(current=p.name, processed=len(rows), errors=errors)
         if limit is not None and len(rows) >= limit:
             break
         seen.add(str(p))
@@ -215,6 +220,8 @@ def run(ctx, limit: int | None = None, out: Path | None = None, store: bool = Tr
             r.setdefault(k, None)
         r["needs_review"] = needs_review(r)
     summary = summarize(rows) | {"errors": errors}
+    if reporter:
+        reporter.finish(processed=len(rows), errors=errors)
     out_dir = Path(out) if out else Path(s.report_dir)
     paths = write_reports(rows, summary, out_dir)
     stored = 0

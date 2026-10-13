@@ -27,6 +27,7 @@ from aibrarian import services
 from aibrarian.actions import Context, discover, run_action
 from aibrarian.config import get_settings
 from aibrarian.logging_setup import setup_logging
+from aibrarian.progress import ProgressReporter
 from aibrarian.status import ACTIONS, MAX_ATTEMPTS
 
 log = logging.getLogger("aibrarian.flows")
@@ -76,12 +77,16 @@ def stage_flow(action: str, limit: int = 20, roots: list[str] | None = None) -> 
     """Run one action over up to ``limit`` items waiting in its input stage."""
     spec = ACTIONS[action]
     rows = ctx().db.claim(spec.requires.value, roots, limit, WORKER)
+    rep = ProgressReporter(f"stage:{action}", total=len(rows))
+    rep.start()
     futures = [ACTION_TASKS[action].submit(r["id"]) for r in rows]
-    results = [f.result(raise_on_failure=False) for f in futures]
     summary: dict[str, int] = {}
-    for r in results:
+    for k, (row, f) in enumerate(zip(rows, futures), 1):
+        r = f.result(raise_on_failure=False)
         key = r if isinstance(r, str) else "error"
         summary[key] = summary.get(key, 0) + 1
+        rep.tick(current=Path(str(row.get("path") or row["id"])).name, processed=k, **summary)
+    rep.finish(processed=len(rows), **summary)
     return {"action": action, "claimed": len(rows), **summary}
 
 
@@ -116,14 +121,16 @@ def pipeline_flow(batch_size: int | None = None, run_discover: bool = False) -> 
 
 @flow(name="library-scan")
 def library_scan_flow(max_items: int | None = None, resume: bool = True) -> dict:
-    return services.library_scan(ctx(), max_items, resume, _run_ids()[0])
+    return services.library_scan(ctx(), max_items, resume, _run_ids()[0],
+                                 reporter=ProgressReporter("library-scan"))
 
 
 @flow(name="book-scan")
 def book_scan_flow(paths: list[str] | None = None, resume: bool = True,
                    max_items: int | None = None) -> dict:
     return services.book_scan(ctx(), [Path(p) for p in paths] if paths else None, resume,
-                              max_items, _run_ids()[0])
+                              max_items, _run_ids()[0],
+                              reporter=ProgressReporter("book-scan"))
 
 
 @flow(name="reprobe")
@@ -181,7 +188,8 @@ def book_autoapply_flow(limit: int | None = None) -> dict:
         log.info("book-autoapply disabled (BOOK_AUTO_APPLY_ENABLED=false)")
         return {"enabled": False}
     n = limit if limit is not None else (s.book_auto_batch_limit or None)
-    res = book_autoapply(ctx(), True, n, progress=log.info, source=f"prefect:{_run_ids()[0]}")
+    res = book_autoapply(ctx(), True, n, progress=log.info, source=f"prefect:{_run_ids()[0]}",
+                         reporter=ProgressReporter("book-autoapply"))
     return {k: v for k, v in res.items() if k != "items"}
 
 
@@ -212,7 +220,8 @@ def transcript_langcheck_flow(limit: int | None = None) -> dict:
     and refresh aib.transcript_lang (manual reviews are kept). Never touches media."""
     from aibrarian import langcheck
 
-    return langcheck.run(ctx(), limit, progress=log.info)["summary"]
+    return langcheck.run(ctx(), limit, progress=log.info,
+                         reporter=ProgressReporter("transcript-langcheck"))["summary"]
 
 
 @flow(name="retry-failed")
@@ -238,8 +247,11 @@ def openlibrary_index_flow(rebuild: bool = False) -> dict:
 
     s = get_settings()
     rl = get_run_logger()
+    rep = ProgressReporter("openlibrary-index", logger=rl, done_key="files")
+    rep.start()
     st = olindex.build_index(Path(s.ol_delta_dir), Path(s.ol_index_path), rebuild=rebuild,
-                             log=rl.info)
+                             log=rl.info, reporter=rep)
+    rep.finish()
     return {k: v for k, v in st.items() if k.startswith("rows_") or k in ("built_at", "size_gb")}
 
 

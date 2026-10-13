@@ -390,7 +390,8 @@ def _quarantine_copy_back(copy: Path, original: Path, s, db, logger) -> str | No
 def autoapply(sugs: list[dict[str, Any]], s, db=None, execute: bool = False,
               limit: int | None = None, source: str = "cli", run_id: str | None = None,
               progress: Callable[[str], None] | None = None, hasher=full_hash,
-              calibre: Calibre | None = None, ref_lookup: Any = "auto") -> dict[str, Any]:
+              calibre: Calibre | None = None, ref_lookup: Any = "auto",
+              reporter: Any = None) -> dict[str, Any]:
     """Dry run (default) or execute. ``sugs``: open book suggestions, oldest first.
     ``ref_lookup``: Open Library index lookup; ``"auto"`` opens ``OL_INDEX_PATH`` if built."""
     say = progress or (lambda _m: None)
@@ -406,6 +407,9 @@ def autoapply(sugs: list[dict[str, Any]], s, db=None, execute: bool = False,
     logger = ActionLog(db, Path(s.report_dir), run_id, source)
     sugs = sugs[:limit] if limit else sugs
     items, counts = [], {}
+    if reporter:
+        reporter.total = len(sugs)
+        reporter.start()
     for k, sug in enumerate(sugs, 1):
         it = assess(sug, s, cal, hasher, ref_lookup)
         say(f"[{k}/{len(sugs)}] {it['confidence']:.2f} "
@@ -446,6 +450,10 @@ def autoapply(sugs: list[dict[str, Any]], s, db=None, execute: bool = False,
         key = it.get("result") or it["decision"]
         counts[key] = counts.get(key, 0) + 1
         items.append(it)
+        if reporter:
+            reporter.tick(current=it.get("title"), processed=len(items), **counts)
+    if reporter:
+        reporter.finish(processed=len(items), **counts)
     return {"dry_run": not execute, "run_id": run_id if execute else None,
             "threshold": s.book_auto_min_confidence, "considered": len(items),
             "counts": counts, "items": items}

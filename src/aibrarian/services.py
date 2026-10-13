@@ -23,13 +23,15 @@ log = logging.getLogger("aibrarian.services")
 
 
 def library_scan(ctx: Context, max_items: int | None = None, resume: bool = True,
-                 flow_run_id: str | None = None) -> dict[str, Any]:
+                 flow_run_id: str | None = None, reporter=None) -> dict[str, Any]:
     """Identify every video/audio file in ``library_roots`` (incl. downloads and
     music) and record placement suggestions. Dry-run: nothing is moved."""
     s = ctx.settings
     run_id = ctx.db.start_run("video", {"max_items": max_items, "resume": resume}, flow_run_id)
     done = ctx.db.suggestion_sources("video") if resume else set()
     counts = {"processed": 0, "skipped_resume": 0, "errors": 0}
+    if reporter:
+        reporter.start()
     for root in s.library_roots:
         base = s.media_root / root
         if not base.is_dir():
@@ -44,6 +46,7 @@ def library_scan(ctx: Context, max_items: int | None = None, resume: bool = True
                 probe = compact_probe(run_ffprobe(p, runner=ctx.runner))
             except Exception as exc:
                 probe = {"error": str(exc)}
+                counts["errors"] += 1
             tags = read_audio_tags(p) if p.suffix.lower() in AUDIO_EXTENSIONS else {}
             parsed = identify(ctx.ollama, str(p.relative_to(s.media_root)), probe, tags)
             match, score = jellyfin_lookup(ctx.jellyfin, parsed)
@@ -51,12 +54,18 @@ def library_scan(ctx: Context, max_items: int | None = None, resume: bool = True
                                   s.video_min_confidence, s.video_review_confidence, run_id)
             ctx.db.save_suggestion(sug)
             counts["processed"] += 1
+            if reporter:
+                reporter.tick(current=p.name, **counts)
+    if reporter:
+        reporter.finish(**counts)
     ctx.db.finish_run(run_id, counts)
     return {"run_id": run_id, **counts}
 
 
 def book_scan(ctx: Context, paths: list[Path] | None = None, resume: bool = True,
-              max_items: int | None = None, flow_run_id: str | None = None) -> dict[str, Any]:
+              max_items: int | None = None, flow_run_id: str | None = None,
+              reporter=None) -> dict[str, Any]:
+    """``reporter``: optional ProgressReporter, ticked once per file."""
     s = ctx.settings
     dirs = paths or s.book_source_dirs
     run_id = ctx.db.start_run("book", {"dirs": [str(d) for d in dirs]}, flow_run_id)
@@ -66,12 +75,20 @@ def book_scan(ctx: Context, paths: list[Path] | None = None, resume: bool = True
     ref = make_ref_lookup(s)
     ol = (lambda t, a, i: ref(t, a, [i] if i else [])) if ref else make_ol_lookup(ctx.db)
     counts = {"processed": 0, "auto_applied": 0, "skipped_resume": 0}
-    for p in books.iter_book_files(dirs):
+    files = list(books.iter_book_files(dirs))
+    if reporter:
+        todo = sum(1 for p in files
+                   if p.suffix.lower() not in VIDEO_EXTENSIONS and str(p) not in done)
+        reporter.total = min(todo, max_items) if max_items else todo
+        reporter.start(f"files_found={len(files)}")
+    for p in files:
         if max_items and counts["processed"] >= max_items:
             break
         if p.suffix.lower() in VIDEO_EXTENSIONS or str(p) in done:
             counts["skipped_resume"] += 1
             continue
+        if reporter:
+            reporter.tick(current=p.name, **counts)
         sug = books.catalog_file(p, s, ctx.ollama, ol_lookup=ol, run_id=run_id,
                                   ref_lookup=ref)
         sid = ctx.db.save_suggestion(sug)
@@ -79,6 +96,8 @@ def book_scan(ctx: Context, paths: list[Path] | None = None, resume: bool = True
         if sug.decision == "auto":
             res = apply_suggestion(ctx, sid, apply=True)
             counts["auto_applied"] += int(res["status"] == "applied")
+    if reporter:
+        reporter.finish(**counts)
     ctx.db.finish_run(run_id, counts)
     return {"run_id": run_id, **counts}
 
@@ -363,11 +382,11 @@ def book_suggestions_oldest_first(ctx: Context) -> list[dict[str, Any]]:
 
 
 def book_autoapply(ctx: Context, execute: bool = False, limit: int | None = None,
-                   progress=None, source: str = "cli") -> dict[str, Any]:
+                   progress=None, source: str = "cli", reporter=None) -> dict[str, Any]:
     from . import booklib
 
     return booklib.autoapply(book_suggestions_oldest_first(ctx), ctx.settings, ctx.db, execute,
-                             limit, source, progress=progress)
+                             limit, source, progress=progress, reporter=reporter)
 
 
 def books_undo(ctx: Context, ids: list[int] | None = None, run_id: str | None = None,
