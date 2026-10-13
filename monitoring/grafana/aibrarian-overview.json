@@ -9,13 +9,13 @@
   },
   "refresh": "1m",
   "tags": [
-    "aibrarian"
+    "aibrarian-overview"
   ],
   "panels": [
     {
       "id": 1,
       "type": "stat",
-      "title": "Pipeline backlog (not yet cataloged)",
+      "title": "Items not yet cataloged",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -33,14 +33,23 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "aib_backlog_items",
-          "legendFormat": "backlog",
+          "expr": "max(aib_backlog_items{job=\"aibrarian-api\"})",
+          "legendFormat": "not cataloged",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Media items still moving through the pipeline (excludes failed, skipped, needs_review). From Postgres via the API.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 2,
@@ -63,14 +72,23 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "aib_media_items{stage=\"failed\"}",
+          "expr": "max(aib_media_items{job=\"aibrarian-api\",stage=\"failed\"})",
           "legendFormat": "failed",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Media items whose pipeline failed after max attempts. From Postgres via the API.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 3,
@@ -93,14 +111,23 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "aib_media_items{stage=\"needs_review\"}",
-          "legendFormat": "needs_review",
+          "expr": "max(aib_media_items{job=\"aibrarian-api\",stage=\"needs_review\"})",
+          "legendFormat": "needs review",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Items waiting for manual review. From Postgres via the API.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 4,
@@ -123,14 +150,23 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "aib_suggestions_open",
-          "legendFormat": "{{domain}}",
+          "expr": "sum(max by (domain) (aib_suggestions_open{job=\"aibrarian-api\"}))",
+          "legendFormat": "open suggestions",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Open librarian suggestions across all domains (books, media). From Postgres via the API.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 5,
@@ -153,14 +189,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "aib_media_items",
+          "expr": "max by (stage) (aib_media_items{job=\"aibrarian-api\"})",
           "legendFormat": "{{stage}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Count of media items in each pipeline stage, from Postgres via the API (one series per stage)."
     },
     {
       "id": 6,
@@ -190,7 +227,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Pipeline actions completed per minute, summed over all workers."
     },
     {
       "id": 7,
@@ -220,7 +258,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Failed action executions per hour, summed over all workers."
     },
     {
       "id": 8,
@@ -250,7 +289,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Action executions per hour split by outcome, summed over all workers."
     },
     {
       "id": 9,
@@ -282,7 +322,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "95th percentile action duration over 30m, aggregated across all workers."
     },
     {
       "id": 10,
@@ -312,7 +353,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "1 = Prometheus can scrape the target, 0 = down."
     },
     {
       "id": 11,
@@ -344,14 +386,15 @@
         },
         {
           "refId": "B",
-          "expr": "collections_total{job=\"qdrant\"}",
+          "expr": "max(collections_total{job=\"qdrant\"})",
           "legendFormat": "collections",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Total vectors and collection count in Qdrant."
     },
     {
       "id": 12,
@@ -388,7 +431,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(DCGM_FI_DEV_GPU_TEMP)",
+          "expr": "count(count by (gpu) (DCGM_FI_DEV_GPU_TEMP))",
           "legendFormat": "GPUs",
           "datasource": {
             "type": "prometheus",
@@ -396,7 +439,15 @@
           }
         }
       ],
-      "description": "Host-level DCGM view. If this is 2 but Ollama is slow, check `docker exec aibrarian-ollama-1 nvidia-smi` (NVML 'Unknown Error' after systemd reload -> restart the container)."
+      "description": "Host-level DCGM view. If this is 2 but Ollama is slow, check `docker exec aibrarian-ollama-1 nvidia-smi` (NVML 'Unknown Error' after systemd reload -> restart the container).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 13,
@@ -421,14 +472,23 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "DCGM_FI_DEV_GPU_UTIL{gpu=\"1\"}",
+          "expr": "max by (gpu, modelName) (DCGM_FI_DEV_GPU_UTIL{gpu=\"1\"})",
           "legendFormat": "{{gpu}} {{modelName}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Current GPU1 utilization (Ollama).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 14,
@@ -453,7 +513,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "DCGM_FI_DEV_FB_USED{gpu=\"1\"}",
+          "expr": "max by (gpu, modelName) (DCGM_FI_DEV_FB_USED{gpu=\"1\"})",
           "legendFormat": "{{gpu}} {{modelName}}",
           "datasource": {
             "type": "prometheus",
@@ -461,7 +521,15 @@
           }
         }
       ],
-      "description": "~0 while aibrarian is embedding/cataloging means Ollama runs on CPU (lost GPU)."
+      "description": "~0 while aibrarian is embedding/cataloging means Ollama runs on CPU (lost GPU).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 15,
@@ -486,14 +554,23 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "DCGM_FI_DEV_FB_USED{gpu=\"0\"}",
+          "expr": "max by (gpu, modelName) (DCGM_FI_DEV_FB_USED{gpu=\"0\"})",
           "legendFormat": "{{gpu}} {{modelName}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Current GPU0 framebuffer memory used (whisper).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
     },
     {
       "id": 16,
@@ -518,14 +595,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "DCGM_FI_DEV_GPU_UTIL",
+          "expr": "max by (gpu, modelName) (DCGM_FI_DEV_GPU_UTIL)",
           "legendFormat": "{{gpu}} {{modelName}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Per-GPU utilization from DCGM."
     },
     {
       "id": 17,
@@ -550,14 +628,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "DCGM_FI_DEV_FB_USED",
+          "expr": "max by (gpu, modelName) (DCGM_FI_DEV_FB_USED)",
           "legendFormat": "{{gpu}} {{modelName}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Per-GPU framebuffer memory used from DCGM."
     },
     {
       "id": 18,
@@ -582,14 +661,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "DCGM_FI_DEV_GPU_TEMP",
+          "expr": "max by (gpu, modelName) (DCGM_FI_DEV_GPU_TEMP)",
           "legendFormat": "{{gpu}} {{modelName}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Per-GPU temperature from DCGM."
     },
     {
       "id": 19,
@@ -621,7 +701,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Host CPU busy %, all cores."
     },
     {
       "id": 20,
@@ -653,7 +734,8 @@
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Host memory used % (excluding cache/buffers)."
     },
     {
       "id": 21,
@@ -678,14 +760,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * (1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\",mountpoint=~\"/|/opt.*\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\",mountpoint=~\"/|/opt.*\"})",
+          "expr": "100 * (1 - max by (mountpoint) (node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\",mountpoint=~\"/|/opt.*\"}) / max by (mountpoint) (node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\",mountpoint=~\"/|/opt.*\"}))",
           "legendFormat": "{{mountpoint}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           }
         }
-      ]
+      ],
+      "description": "Filesystem usage % per mountpoint (one series per mountpoint)."
     }
   ],
   "__inputs": [

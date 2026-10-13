@@ -146,6 +146,8 @@ services:
     environment:
       <<: *aib-env
       AIB_METRICS_PORT: "9108"
+      # Prefect runs flows in subprocesses; aggregate their metrics (container-local, wiped at startup)
+      PROMETHEUS_MULTIPROC_DIR: /tmp/aib-prom-multiproc
     volumes: *media-volumes
     extra_hosts: ["host.docker.internal:host-gateway"]
     ports: ["9108:9108"]
@@ -162,6 +164,8 @@ services:
     environment:
       <<: *aib-env
       AIB_METRICS_PORT: "9109"
+      # Prefect runs flows in subprocesses; aggregate their metrics (container-local, wiped at startup)
+      PROMETHEUS_MULTIPROC_DIR: /tmp/aib-prom-multiproc
       AIB_WHISPER_MODEL: ${AIB_WHISPER_MODEL:-large-v3}
       AIB_WHISPER_DEVICE: cuda
       AIB_WHISPER_COMPUTE_TYPE: float16

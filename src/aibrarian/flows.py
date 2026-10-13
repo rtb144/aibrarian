@@ -266,8 +266,6 @@ def deployments(group: str) -> list:
 def main(argv: list[str] | None = None) -> None:
     import sys
 
-    from prometheus_client import start_http_server
-
     argv = sys.argv[1:] if argv is None else argv
     setup_logging("aibrarian-worker")
     if argv and argv[0] == "serve":
@@ -277,7 +275,10 @@ def main(argv: list[str] | None = None) -> None:
             services.dedup_backfill(ctx())
         except Exception as exc:
             log.warning("dedup backfill failed", extra={"error": str(exc)})
-        start_http_server(int(os.getenv("AIB_METRICS_PORT", "9108")))
+        from aibrarian.metrics import reset_multiprocess_dir, start_metrics_server
+
+        reset_multiprocess_dir()
+        start_metrics_server(int(os.getenv("AIB_METRICS_PORT", "9108")))
         serve(*deployments(group))
     else:
         print(pipeline_flow())
