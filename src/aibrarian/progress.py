@@ -11,7 +11,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 DEFAULT_INTERVAL = 900.0
 _fallback = logging.getLogger("aibrarian.progress")

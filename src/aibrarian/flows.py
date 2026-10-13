@@ -21,13 +21,12 @@ from prefect import flow, serve, task
 from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
 from prefect.runtime import flow_run, task_run
 
-from aibrarian.quarantine import PURGE_CRON
-
 from aibrarian import services
 from aibrarian.actions import Context, discover, run_action
 from aibrarian.config import get_settings
 from aibrarian.logging_setup import setup_logging
 from aibrarian.progress import ProgressReporter
+from aibrarian.quarantine import PURGE_CRON
 from aibrarian.status import ACTIONS, MAX_ATTEMPTS
 
 log = logging.getLogger("aibrarian.flows")
@@ -81,7 +80,7 @@ def stage_flow(action: str, limit: int = 20, roots: list[str] | None = None) -> 
     rep.start()
     futures = [ACTION_TASKS[action].submit(r["id"]) for r in rows]
     summary: dict[str, int] = {}
-    for k, (row, f) in enumerate(zip(rows, futures), 1):
+    for k, (row, f) in enumerate(zip(rows, futures, strict=True), 1):
         r = f.result(raise_on_failure=False)
         key = r if isinstance(r, str) else "error"
         summary[key] = summary.get(key, 0) + 1
