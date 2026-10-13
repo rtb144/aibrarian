@@ -116,10 +116,15 @@ def chunk_segments(raw: Iterable[RawSegment], target_seconds: float) -> list[Seg
     return chunks
 
 
-def result_to_dict(r: TranscriptResult, fingerprint: str, model: str) -> dict:
-    """Sidecar JSON shape (raw whisper segments, word timings included)."""
+def result_to_dict(r: TranscriptResult, fingerprint: str, model: str,
+                   audio_stream_index: int | None = None,
+                   audio_language: str | None = None) -> dict:
+    """Sidecar JSON shape (raw whisper segments, word timings included).
+    ``audio_stream_index``/``audio_language``: the ffprobe track transcribed."""
+    extra = {} if audio_stream_index is None else {
+        "audio_stream_index": audio_stream_index, "audio_language": audio_language}
     return {"fingerprint": fingerprint, "model": model, "language": r.language,
-            "duration": r.duration,
+            "duration": r.duration, **extra,
             "segments": [{"start": s.start, "end": s.end, "text": s.text,
                           "words": [list(w) for w in (s.words or [])]} for s in r.segments]}
 

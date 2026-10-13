@@ -253,9 +253,15 @@ def extract_audio(ctx: Context, row: dict) -> Outcome:
     marker = wav.with_suffix(".stream")  # which track the cached WAV came from
     cached = (wav.exists() and wav.stat().st_size > 0 and marker.exists()
               and marker.read_text() == str(sel["index"]))
+    log.info("audio stream selected", extra={
+        "media_id": row["id"], "stream_index": sel["index"],
+        "audio_ordinal": sel["audio_ordinal"], "stream_language": sel.get("language"),
+        "stream_title": sel.get("title"), "selection": sel["reason"],
+        "audio_streams": sel["audio_streams"], "cached": cached})
     if not cached:
         tmp = wav.with_suffix(".part.wav")
-        run_checked(extract_audio_cmd(video, tmp, sel["index"]), ctx.runner)
+        run_checked(extract_audio_cmd(video, tmp, audio_ordinal=sel["audio_ordinal"]),
+                    ctx.runner)
         tmp.replace(wav)
         marker.write_text(str(sel["index"]))
     lang = "en" if sel["english"] else sel.get("language")
@@ -263,6 +269,7 @@ def extract_audio(ctx: Context, row: dict) -> Outcome:
                                audio_language=lang, audio_layout=sel.get("layout"))
     return Outcome(Stage.AUDIO_EXTRACTED, {
         "wav": str(wav), "bytes": wav.stat().st_size, "stream_index": sel["index"],
+        "audio_ordinal": sel["audio_ordinal"], "stream_title": sel.get("title"),
         "stream_language": sel.get("language"), "english": sel["english"],
         "selection": sel["reason"], "layout": sel.get("layout"),
         "audio_streams": len(info.get("audio") or [])})
@@ -287,8 +294,10 @@ def transcribe(ctx: Context, row: dict) -> Outcome:
                          s.whisper_model, result.duration)
     if s.write_sidecars and (not reused or existing.get("legacy")):  # upgrade legacy format
         try:
-            sidecars.write_sidecars(video, result_to_dict(result, row["fingerprint"],
-                                                          s.whisper_model))
+            sidecars.write_sidecars(video, result_to_dict(
+                result, row["fingerprint"], s.whisper_model,
+                audio_stream_index=None if reused else row.get("audio_stream_index"),
+                audio_language=None if reused else row.get("audio_language")))
         except OSError as exc:  # read-only media mount: keep going, note it
             log.warning("sidecar write failed", extra={"media_id": row["id"], "error": str(exc)})
     if row.get("audio_path"):

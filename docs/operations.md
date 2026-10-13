@@ -43,6 +43,31 @@ All commands run from the repo checkout on z8g4 (e.g. `/opt/stacks/aibrarian`).
 | fix orphaned subtitles from old logs | `aibrarian srt-report --log …` then `aibrarian sync-subtitles --log … --apply` |
 | regenerate code docs | `aibrarian gen-docs src --out docs/reference` |
 
+## Re-transcribing dubbed-track transcripts (`transcripts requeue-lang`)
+
+Audio track choice (extract_audio): English by language tag (`eng`/`en`/`english`) or, for
+untagged tracks, an "English" title; commentary / audio-description tracks
+(disposition, or title containing commentary/description/`AD`) last; then default
+disposition; then more channels. No English track: default stream, else the first.
+The track is mapped with `-map 0:a:N`, logged ("audio stream selected"), stored in
+`aib.media_file.audio_stream_index/audio_language` and in new sidecars
+(`audio_stream_index`, `audio_language`).
+
+```bash
+dc exec aibrarian-api aibrarian transcripts requeue-lang                      # dry run table
+dc exec aibrarian-api aibrarian transcripts requeue-lang --execute            # re-queue
+dc exec aibrarian-api aibrarian transcripts requeue-lang --include-untagged   # + multi-track, untagged
+```
+
+Candidates: `aib.transcript_lang` rows with `non_english` or `mismatch`, excluding
+`review='correct'`. Re-queued when the file has an English track other than the one
+used (or the used track is unknown, e.g. a reused legacy sidecar). `--execute` moves
+`<stem>.transcript.json` + `<stem>.srt` to `QUARANTINE_DIR/<date>/` (manifest,
+`reason=transcript_requeue_lang`, undo with `duplicates restore --manifest`) and resets
+the item to `probed` (`reset` event); the media-pipeline redoes
+extract_audio -> transcribe -> embed -> catalog. Single-track foreign films are listed
+as *keep as-is*. Moved transcripts follow normal quarantine retention (`quarantine-purge`).
+
 ## Upgrades
 
 ```bash

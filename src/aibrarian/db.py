@@ -610,6 +610,18 @@ class Database:
                 "FROM aib.transcript_lang").fetchone()
         return {"total": total, "counts": counts, "items": items}
 
+    def langcheck_requeue_candidates(self) -> list[dict[str, Any]]:
+        """non_english / mismatch rows not reviewed 'correct', with their media row."""
+        with self.conn() as c:
+            return c.execute(
+                "SELECT l.id AS lang_id, l.path AS transcript_path, l.title AS lang_title, "
+                "l.detected_lang, l.stored_lang, l.review, m.id AS media_id, m.path, "
+                "COALESCE(m.title, l.title) AS title, m.stage, m.media_info, "
+                "m.audio_stream_index, m.audio_language, m.missing "
+                "FROM aib.transcript_lang l LEFT JOIN aib.media_file m ON m.id = l.media_id "
+                "WHERE (l.non_english OR l.mismatch) AND l.review IS DISTINCT FROM 'correct' "
+                "ORDER BY COALESCE(m.title, l.title)").fetchall()
+
     def langcheck_review(self, item_id: int, review: str | None,
                          note: str | None = None) -> dict[str, Any] | None:
         with self.conn() as c:

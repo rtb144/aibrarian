@@ -75,8 +75,9 @@ def test_llm_view_small():
 def test_select_audio_stream_rules():
     info = media_info(PROBE)
     assert select_audio_stream(info)["index"] == 2  # first English (no English default)
-    info["audio"][2]["default"] = True  # commentary marked default (english_default)
-    assert select_audio_stream(info)["reason"] == "english_default"
+    info["audio"][2]["default"] = True  # commentary marked default: still skipped
+    assert select_audio_stream(info)["index"] == 2
+    assert select_audio_stream(info)["reason"] == "english"
     info["audio"][2]["default"] = False
     info["audio"][1]["default"] = True
     assert select_audio_stream(info)["index"] == 2

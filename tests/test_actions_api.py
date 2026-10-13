@@ -68,7 +68,7 @@ def test_full_pipeline_happy_path(ctx, tmp_path):
     m = ctx.db.media[row["id"]]
     assert m["stage"] == "cataloged" and m["duration_s"] == 120.5 and m["jellyfin_id"] == "jf1"
     # English track (index 2) chosen over the French default, and whisper forced to en
-    assert ffmpeg_calls[-1][ffmpeg_calls[-1].index("-map") + 1] == "0:2"
+    assert ffmpeg_calls[-1][ffmpeg_calls[-1].index("-map") + 1] == "0:a:1"
     assert m["audio_stream_index"] == 2 and m["audio_language"] == "en" and tr.languages == ["en"]
     assert m["audio_layout"] == "7.1" and m["media_info"]["audio"][0]["layout"] == "5.1"
     ex = next(e for e in ctx.db.events if e["action"] == "extract_audio")["details"]

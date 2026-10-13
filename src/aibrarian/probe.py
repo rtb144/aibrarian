@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -178,25 +179,52 @@ def is_english(lang: str | None) -> bool:
     return bool(lang) and lang.strip().lower() in ENGLISH
 
 
-def select_audio_stream(info: dict[str, Any]) -> dict[str, Any] | None:
-    """English default > first English > default > first audio stream.
+_EN_TITLE = re.compile(r"\b(english|eng|en)\b", re.IGNORECASE)
+_SECONDARY_TITLE = re.compile(r"commentary|descri", re.IGNORECASE)
+_AD_TITLE = re.compile(r"\bAD\b")  # case-sensitive: "AD", not "ad"/"Ad"
 
-    Returns the stream dict plus ``english`` (bool) and ``reason``."""
-    audio = [a for a in info.get("audio") or [] if a.get("index") is not None]
-    if not audio:
+
+def stream_is_english(a: dict[str, Any]) -> bool:
+    """English by language tag, or (tag missing/und) by an 'English' title."""
+    if is_english(a.get("language")):
+        return True
+    lang = (a.get("language") or "").strip().lower()
+    return lang in ("", "und", "unk", "mis", "zxx") and bool(_EN_TITLE.search(a.get("title") or ""))
+
+
+def is_secondary_audio(a: dict[str, Any]) -> bool:
+    """Commentary / audio-description track (disposition or title)."""
+    t = a.get("title") or ""
+    return bool(a.get("comment") or a.get("visual_impaired")
+                or _SECONDARY_TITLE.search(t) or _AD_TITLE.search(t))
+
+
+def select_audio_stream(info: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the track to transcribe.
+
+    English (language tag, or 'English' in the title of an untagged track),
+    main tracks before commentary / audio description, then default
+    disposition, then more channels. Without an English track: default stream,
+    else the first (the old ffmpeg behaviour). Returns the stream dict plus
+    ``english`` (bool), ``reason`` and ``audio_ordinal`` (N in ``-map 0:a:N``)."""
+    streams = [a for a in info.get("audio") or [] if a.get("index") is not None]
+    if not streams:
         return None
-    # commentary / audio-description tracks go last so the main mix wins
-    audio.sort(key=lambda a: bool(a.get("comment") or a.get("visual_impaired")))
-    eng = [a for a in audio if is_english(a.get("language"))]
-    for cand, reason in (
-        (next((a for a in eng if a.get("default")), None), "english_default"),
-        (eng[0] if eng else None, "english_first"),
-        (next((a for a in audio if a.get("default")), None), "default"),
-        (audio[0], "first"),
-    ):
-        if cand is not None:
-            return cand | {"english": reason.startswith("english"), "reason": reason}
-    return None
+    ordinal = {id(a): n for n, a in enumerate(streams)}
+    eng = [a for a in streams if stream_is_english(a)]
+    if eng:
+        best = min(eng, key=lambda a: (is_secondary_audio(a), not a.get("default"),
+                                       -(a.get("channels") or 0), ordinal[id(a)]))
+        reason = ("english_secondary" if is_secondary_audio(best)
+                  else "english_default" if best.get("default") else "english")
+    else:
+        main = sorted(streams, key=lambda a: is_secondary_audio(a))
+        best = next((a for a in main if a.get("default")), None)
+        reason = "default"
+        if best is None:
+            best, reason = main[0], "first"
+    return best | {"english": bool(eng), "reason": reason, "audio_ordinal": ordinal[id(best)],
+                   "audio_streams": len(streams)}
 
 
 def has_audio(probe: dict[str, Any]) -> bool:
@@ -207,12 +235,16 @@ def duration_of(probe: dict[str, Any]) -> float | None:
     return _f((probe.get("format") or {}).get("duration"))
 
 
-def extract_audio_cmd(src: Path, dst: Path, stream_index: int | None = None) -> list[str]:
+def extract_audio_cmd(src: Path, dst: Path, stream_index: int | None = None,
+                      audio_ordinal: int | None = None) -> list[str]:
     """16 kHz mono WAV - the exact input whisper wants; decoding once on CPU keeps
-    the GPU busy only with inference. ``stream_index`` (absolute ffprobe index)
-    selects the track via ``-map 0:<index>``; the source file is never modified."""
+    the GPU busy only with inference. ``audio_ordinal`` selects the N-th audio
+    track via ``-map 0:a:N`` (preferred); ``stream_index`` (absolute ffprobe
+    index) via ``-map 0:<index>``. The source file is never modified."""
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
-    if stream_index is not None:
+    if audio_ordinal is not None:
+        cmd += ["-map", f"0:a:{int(audio_ordinal)}"]
+    elif stream_index is not None:
         cmd += ["-map", f"0:{int(stream_index)}"]
     return cmd + ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dst)]
 

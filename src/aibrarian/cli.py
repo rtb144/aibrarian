@@ -222,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("--force", action="store_true")
 
     sub.add_parser("prefect-limits", help="create tag concurrency limits in Prefect")
-    tr = sub.add_parser("transcripts", help="transcript checks (read-only)")
+    tr = sub.add_parser("transcripts", help="transcript checks (langcheck is read-only)")
     trs = tr.add_subparsers(dest="tr_cmd", required=True)
     tlc = trs.add_parser("langcheck", help="detect non-English / garbage transcripts; writes "
                          "langcheck.json + .csv to REPORT_DIR (never touches media/transcripts)")
@@ -231,6 +231,13 @@ def build_parser() -> argparse.ArgumentParser:
     tlc.add_argument("--no-store", action="store_true", help="do not save into aib.transcript_lang")
     tlc.add_argument("--no-db", action="store_true", help="sidecars only (skip DB-only transcripts)")
     tlc.add_argument("--json", action="store_true", help="print the summary as JSON")
+    trq = trs.add_parser("requeue-lang", help="re-transcribe non-English transcripts whose file "
+                         "has an English audio track (dry run unless --execute; old transcripts "
+                         "are moved to QUARANTINE_DIR/<date>, never deleted)")
+    trq.add_argument("--execute", action="store_true", help="move old transcripts + reset stage")
+    trq.add_argument("--include-untagged", action="store_true",
+                     help="also re-queue files with several audio tracks but no English tag")
+    trq.add_argument("--json", action="store_true", help="print plan/results as JSON")
     return p
 
 
@@ -491,6 +498,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
             _print(res["summary"])
         else:
             print(langcheck.format_summary(res), end="")
+    elif cmd == "transcripts" and args.tr_cmd == "requeue-lang":
+        from . import requeue_lang
+
+        plan = requeue_lang.plan(ctx, include_untagged=args.include_untagged)
+        res = requeue_lang.execute(ctx, plan) if args.execute else None
+        if args.json:
+            _print({"plan": plan, "result": res})
+        else:
+            print(requeue_lang.format_plan(plan, res), end="")
     elif cmd == "openlibrary-lookup":
         from .openlibrary import lookup
 
