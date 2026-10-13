@@ -158,13 +158,13 @@ you go (edit this file, or copy it into Obsidian).
   Done when: `curl z8g4:8790/openlibrary/stats` shows `index.built_at` and tens of millions of
   `rows_edition` / `rows_isbn`.
 
-- [ ] **4.11 Hook up Prometheus.**
-  Do: append `docker/prometheus/aibrarian-scrape.yml` to the `scrape_configs` in `/opt/stacks/monitoring`'s prometheus.yml, then restart Prometheus.
-  Done when: Prometheus → Status → Targets shows the 3 aibrarian targets **UP**.
+- [ ] **4.11 Hook up Prometheus.** (files ready; use your existing Prometheus)
+  Do: append `monitoring/prometheus/aibrarian-scrape.yml` to `scrape_configs` in your existing prometheus.yml, then reload/restart Prometheus.
+  Done when: Prometheus → Status → Targets shows aibrarian-api, aibrarian-workers (2) and qdrant **UP**.
 
-- [ ] **4.12 Import the Grafana dashboard.**
-  Do: Grafana → Dashboards → Import → upload `docker/grafana/aibrarian-dashboard.json`.
-  Done when: the "aibrarian" dashboard shows stage bars.
+- [ ] **4.12 Import the Grafana dashboard.** (file ready)
+  Do: Grafana → Dashboards → New → Import → upload `monitoring/grafana/aibrarian-overview.json`, pick the Prometheus datasource.
+  Done when: the "aibrarian overview" dashboard shows stage bars and backlog.
 
 ## Phase 5: Apply library changes (carefully)
 

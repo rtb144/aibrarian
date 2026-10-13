@@ -7,7 +7,7 @@ All commands run from the repo checkout on z8g4 (e.g. `/opt/stacks/aibrarian`).
 
 - Dashboard: `http://z8g4:8790/dashboard` (stage cards, failures, ETA)
 - Prefect: `http://z8g4:4200` (flow runs, schedules, retries)
-- Grafana: the "aibrarian" dashboard (import `docker/grafana/aibrarian-dashboard.json`)
+- Grafana: the "aibrarian" dashboard (import `monitoring/grafana/aibrarian-overview.json`; Prometheus scrape jobs in `monitoring/prometheus/aibrarian-scrape.yml` — metrics: API `http://192.168.68.52:8790/metrics`, workers `:9108`/`:9109`, Qdrant `:6333/metrics`)
 - From the CLI: `dc exec aibrarian-api aibrarian status`
 
 ## Services
@@ -430,3 +430,14 @@ dc exec aibrarian-api aibrarian embed-eval run
 dc exec aibrarian-api aibrarian embed-eval query "scene where they argue about the money"
 dc exec aibrarian-api aibrarian embed-eval cleanup
 ```
+
+## Monitoring (existing Prometheus/Grafana in /opt/stacks/monitoring)
+
+1. Append the jobs in `monitoring/prometheus/aibrarian-scrape.yml` under `scrape_configs:` in
+   `/opt/stacks/monitoring/prometheus/prometheus.yml` (targets use `host.docker.internal`, already
+   in that container's extra_hosts): API `:8790/metrics`, workers `:9108`/`:9109`, Qdrant `:6333/metrics`.
+2. `docker restart prometheus` (no `--web.enable-lifecycle`, so `/-/reload` is unavailable).
+   Check http://192.168.68.52:9090/targets.
+3. Grafana http://192.168.68.52:3000 → Dashboards → New → Import → upload
+   `monitoring/grafana/aibrarian-overview.json` → pick the Prometheus datasource.
+   GPU panels use dcgm_exporter (`DCGM_FI_DEV_*`), host panels node_exporter.

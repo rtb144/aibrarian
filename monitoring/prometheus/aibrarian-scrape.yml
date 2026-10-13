@@ -1,0 +1,14 @@
+# Paste under `scrape_configs:` in your existing prometheus.yml, then reload Prometheus.
+# Prometheus runs in /opt/stacks/monitoring with extra_hosts host.docker.internal:host-gateway (= z8g4). API: stage/backlog/suggestion gauges (computed from Postgres at
+# scrape time). Workers: action counters/durations (cpu 9108, gpu 9109). Qdrant: native /metrics.
+- job_name: aibrarian-api
+  metrics_path: /metrics
+  static_configs:
+    - targets: ["host.docker.internal:8790"]
+- job_name: aibrarian-workers
+  static_configs:
+    - targets: ["host.docker.internal:9108", "host.docker.internal:9109"]
+- job_name: qdrant
+  metrics_path: /metrics
+  static_configs:
+    - targets: ["host.docker.internal:6333"]
