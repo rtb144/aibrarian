@@ -159,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
     sr = sub.add_parser("srt-report", help="(was compare_rename_move_srt.py)")
     sr.add_argument("--log", type=Path, action="append")
 
+    sp = sub.add_parser("srt-pair", help="pair orphan .srt files with the single video in "
+                        "their movie dir (Jellyfin names; dry run unless --execute; others "
+                        "to QUARANTINE_DIR/<date>, undo with duplicates restore)")
+    sp.add_argument("--root", type=Path, help="default MEDIA_ROOT/01-movies")
+    sp.add_argument("--execute", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--langs", help="kept languages, comma list (default env AIB_SUB_LANGS "
+                    "or eng)")
+    sp.add_argument("--limit", type=int, help="only the first N dirs")
+    sp.add_argument("--include-no-video", action="store_true",
+                    help="also quarantine srts of dirs that have no video")
+
     se = sub.add_parser("search")
     se.add_argument("query")
     se.add_argument("--mode", default="hybrid", choices=["hybrid", "semantic", "keyword"])
@@ -495,6 +507,17 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         recs = [r for lp in (args.log or [None]) for r in _records(lp, ctx)]
         _print(fileops.subtitle_report(s.media_root, recs))
+    elif cmd == "srt-pair":
+        from . import srtpair
+
+        root = args.root or Path(s.media_root) / "01-movies"
+        plan = srtpair.plan(root, srtpair.kept_langs(args.langs), args.limit,
+                            args.include_no_video)
+        res = srtpair.execute(plan, s, ctx.db, say=_say) if args.execute else None
+        if args.json:
+            _print({"plan": plan, "result": res})
+        else:
+            print(srtpair.format_plan(plan, res), end="")
     elif cmd == "search":
         from .titles import TitleNotResolved
 

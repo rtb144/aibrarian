@@ -73,6 +73,7 @@ aibrarian apply --domain video --kind movie --apply    # actually move
 aibrarian search "space travel" --mode semantic
 aibrarian clip "I'll be back" --title "Terminator"
 aibrarian srt-report | sync-subtitles | cleanup-skipped | srt-catalog
+aibrarian srt-pair [--root /media/01-movies] [--langs eng] [--limit N] [--include-no-video] [--execute]  # pair orphan srts (dry run)
 aibrarian openlibrary build-index      # Delta Lake -> /data/olindex/openlibrary.sqlite
 aibrarian openlibrary stats
 aibrarian gen-docs src --out docs/reference
