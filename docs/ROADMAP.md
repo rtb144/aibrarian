@@ -178,11 +178,24 @@ you go (edit this file, or copy it into Obsidian).
 
 - [ ] **5.3 Apply the rest of the confident movie moves.**
   Do: `dc exec aibrarian-api aibrarian apply --domain video --kind movie --apply`
-  Done when: the output has no `"result": "error"` (`skip_dst_exists` is fine; that's handled in 5.4).
+  Done when: the output has no `"result": "error"`.
+  Note (2026-10-13): if the destination already exists, apply no longer refuses. The dry run shows
+  `"status": "would_quarantine:dst_exists"` with a `quarantine` block (src/dst size + sha256,
+  `comparison` identical|different|same_size_unhashed, `larger` src|dst|same_size). Big equal-size
+  files are not hashed in the dry run (`same_size_unhashed` + note); `--apply` always hashes both.
+  `--apply` moves the SOURCE and its sidecars to `QUARANTINE_DIR/<date>/` (manifest.jsonl/tsv,
+  dedup-actions.log, aib.dedup_action `quarantine` with reason `dst_exists:...`, aib.file_op
+  `quarantine`), never touches the destination, never deletes, and marks the suggestion
+  `quarantined_dst_exists`. Purged after QUARANTINE_RETENTION_DAYS (30), so rescue a better
+  (`larger=src`) version before then. Undo: `aibrarian duplicates restore --manifest
+  <quarantine>/<date>/manifest.jsonl [--path <src>] --execute` (reopens the suggestion).
 
 - [ ] **5.4 Clean up duplicates (dry run first).**
   Do: `dc exec aibrarian-api aibrarian cleanup-skipped`, check the output, then add `--apply`.
   Done when: the dry-run list looked right and the `--apply` run shows `ok` rows.
+  Note (2026-10-13): legacy only. New `apply` runs quarantine the source instead of leaving a
+  `skip_dst_exists` behind, so this only finds old file_op rows (sources already quarantined
+  show `skip_missing`). Still works unchanged.
 
 - [x] **5.4b Quarantine identical duplicates (first batch: 3 files, 50.74 GB, still playable).**
   Do: `dc exec aibrarian-api aibrarian duplicates quarantine --limit 3` then `--execute`.

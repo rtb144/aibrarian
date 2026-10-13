@@ -124,6 +124,30 @@ def apply_suggestion(ctx: Context, sid: int, apply: bool = False) -> dict[str, A
     if not apply and result not in ("dry_run", "ok"):
         status = f"would_refuse:{result}"
     out = base | {"status": status, "ops": [o.__dict__ for o in ops]}
+    if result == "skip_dst_exists" and main is not None and main.src == str(src):
+        # Tom's rule: destination exists -> quarantine the SOURCE (+ sidecars), never
+        # touch the destination, never delete; undo via `duplicates restore`.
+        from . import quarantine
+
+        q = quarantine.quarantine_dst_exists(
+            src, dst, ctx.settings, apply=apply, db=ctx.db, suggestion_id=sid,
+            roots=_allowed_roots(ctx))
+        ctx.db.record_file_op("quarantine", str(src), q["quarantine_path"],
+                              "would_quarantine" if not apply else q["result"],
+                              "dst_exists" if q["result"] != "error" else q.get("error"), sid)
+        out["quarantine"] = q
+        out["ops"].append({"op": "quarantine", "src": str(src), "dst": q["quarantine_path"],
+                           "result": q["result"], "error": q.get("error"),
+                           "comparison": q["comparison"], "larger": q["larger"]})
+        if not apply:
+            out["status"] = "would_quarantine:dst_exists"
+            return out
+        if q["result"] == "quarantined_dst_exists":
+            ctx.db.set_suggestion_status(sid, "quarantined_dst_exists")
+            out["status"] = "quarantined_dst_exists"
+            return out
+        out["status"] = "failed_quarantine"  # left open; nothing moved
+        return out
     if not apply:
         return out
     if status == "applied":

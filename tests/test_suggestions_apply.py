@@ -85,14 +85,16 @@ def test_apply_dry_run_then_apply(ctx, settings):
     assert services.apply_suggestion(ctx, 1, apply=True)["status"] == "not_open:applied"
 
 
-def test_apply_refuses_existing_destination(ctx, settings):
+def test_apply_existing_destination_quarantines_source(ctx, settings):
     src, dst, _, refreshed = setup(ctx, settings)
     dst.parent.mkdir(parents=True)
     dst.write_bytes(b"other")
-    assert services.apply_suggestion(ctx, 1)["status"] == "would_refuse:skip_dst_exists"
+    assert services.apply_suggestion(ctx, 1)["status"] == "would_quarantine:dst_exists"
     out = services.apply_suggestion(ctx, 1, apply=True)
-    assert out["status"] == "refused_dst_exists" and src.exists() and dst.read_bytes() == b"other"
-    assert ctx.db.sug[1]["status"] == "open" and not refreshed and not ctx.db.paths
+    assert out["status"] == "quarantined_dst_exists" and not src.exists()
+    assert dst.read_bytes() == b"other"
+    assert ctx.db.sug[1]["status"] == "quarantined_dst_exists" and not refreshed
+    assert not ctx.db.paths
 
 
 def test_noop_apply_and_api_reject(ctx, settings):

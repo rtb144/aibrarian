@@ -277,6 +277,8 @@ def restore(manifest: Path, execute: bool = False, db=None,
         if db is not None and r.get("media_id"):
             db.restore_media(r["media_id"], r["quarantine_path"], r["path"],
                              r.get("prev_stage") or "discovered", started)
+        if db is not None and r.get("suggestion_id") and hasattr(db, "set_suggestion_status"):
+            db.set_suggestion_status(r["suggestion_id"], "open")  # dst_exists undo: retry later
         out.append(item | {"result": "restored"})
         log_action(manifest.parent.parent, db, source, action="restore",
                    group_no=r.get("group"), media_id=r.get("media_id"),
@@ -619,3 +621,107 @@ def _restore_folders(batch: Path, restored_paths: list[Path]) -> int:
                                  "at": datetime.now(UTC).isoformat()}) + "\n")
         n += 1
     return n
+
+
+# --- suggestion apply: destination already exists ---------------------------------
+DRY_RUN_HASH_LIMIT = 64 * 1024 * 1024  # dry run hashes equal-size files only below this
+
+
+def _qpath(batch: Path, src: Path, roots: list[Path]) -> Path:
+    for r in roots:
+        try:
+            return batch / src.resolve().relative_to(Path(r).resolve())
+        except ValueError:
+            continue
+    return batch / str(src.resolve()).lstrip("/")
+
+
+def compare_files(src: Path, dst: Path, hash_equal_size: bool = True,
+                  hasher=full_hash) -> dict[str, Any]:
+    """Size first; sha256 both only when sizes match (or always when ``hash_equal_size``
+    is "always"). ``comparison`` is identical | different | same_size_unhashed."""
+    ss, ds = src.stat().st_size, dst.stat().st_size
+    out: dict[str, Any] = {"src_size": ss, "dst_size": ds, "src_sha256": None,
+                           "dst_sha256": None}
+    if hash_equal_size == "always" or (ss == ds and hash_equal_size):
+        out["src_sha256"], out["dst_sha256"] = hasher(src), hasher(dst)
+    if ss != ds:
+        out["comparison"] = "different"
+        out["larger"] = "src" if ss > ds else "dst"
+    elif out["src_sha256"] is None:
+        out["comparison"] = "same_size_unhashed"
+        out["larger"] = None
+        out["note"] = "sizes equal; sha256 not computed in dry run (always hashed with --apply)"
+    else:
+        out["comparison"] = ("identical" if out["src_sha256"] == out["dst_sha256"]
+                             else "different")
+        out["larger"] = None if out["comparison"] == "identical" else "same_size"
+    return out
+
+
+def quarantine_dst_exists(src: Path, dst: Path, settings, *, apply: bool, db=None,
+                          suggestion_id: int | None = None, roots: list[Path] | None = None,
+                          source: str | None = "cli", hasher=full_hash) -> dict[str, Any]:
+    """Destination of a suggestion already exists: move the SOURCE (plus its sidecars,
+    which would otherwise be orphaned) into ``<quarantine>/<date>/``. The destination is
+    never touched, nothing is deleted. Undo with ``duplicates restore --manifest``."""
+    from aibrarian.sidecars import related_sidecars
+
+    root = quarantine_root(settings)
+    batch = root / date.today().isoformat()
+    roots = roots or [Path(settings.media_root)]
+    qdst = _qpath(batch, src, roots)
+    sides = [(sp, qdst.with_name(qdst.stem + sp.name[len(src.stem):]))
+             for sp in related_sidecars(src)]
+    dst_sides = {p.name for p in related_sidecars(dst)} if dst.exists() else set()
+    small = src.stat().st_size <= DRY_RUN_HASH_LIMIT
+    cmp = compare_files(src, dst, "always" if apply else small, hasher)
+    out: dict[str, Any] = {
+        "src": str(src), "dst": str(dst), "quarantine_path": str(qdst), "reason": "dst_exists",
+        **cmp,
+        "sidecars": [{"from": str(a), "to": str(b),
+                      "collides_at_dst": (dst.stem + a.name[len(src.stem):]) in dst_sides}
+                     for a, b in sides]}
+    if not apply:
+        return out | {"result": "would_quarantine:dst_exists"}
+    if qdst.exists():
+        return out | {"result": "error", "error": "quarantine target already exists"}
+    media = db.get_media_by_path(str(src)) if db is not None and hasattr(
+        db, "get_media_by_path") else None
+    media_id = media["id"] if media else None
+    started = datetime.now(UTC)
+    qdst.parent.mkdir(parents=True, exist_ok=True)
+    if src.stat().st_dev != qdst.parent.stat().st_dev:
+        return out | {"result": "error",
+                      "error": "quarantine dir is on another filesystem; refusing slow copy"}
+    try:
+        os.rename(src, qdst)
+        moved_sides = []
+        for sp, sd in sides:
+            if sp.exists() and not sd.exists():
+                os.rename(sp, sd)
+                moved_sides.append({"from": str(sp), "to": str(sd)})
+    except OSError as exc:
+        return out | {"result": "error", "error": str(exc)}
+    rec = {"moved_at": started.isoformat(), "group": None, "media_id": media_id,
+           "size_bytes": cmp["src_size"], "keeper": str(dst), "path": str(src),
+           "quarantine_path": str(qdst), "prev_stage": media.get("stage") if media else None,
+           "reason": "dst_exists", "suggestion_id": suggestion_id,
+           "src_sha256": cmp["src_sha256"], "dst_size": cmp["dst_size"],
+           "dst_sha256": cmp["dst_sha256"], "comparison": cmp["comparison"],
+           "larger": cmp["larger"], "sidecars_copied_to_keeper": [],
+           "sidecars_moved": moved_sides}
+    _write_manifest(batch, rec)
+    if db is not None and media_id and hasattr(db, "quarantine_media"):
+        db.quarantine_media(media_id, str(src), str(qdst), started,
+                            {"keeper": str(dst), "reason": "dst_exists",
+                             "comparison": cmp["comparison"]})
+    why = f"dst_exists:{cmp['comparison']}" + (f",larger={cmp['larger']}"
+                                                if cmp["larger"] else "")
+    log_action(root, db, source, action="quarantine", media_id=media_id, keeper_path=str(dst),
+               file_path=str(src), quarantine_path=str(qdst), size_bytes=cmp["src_size"],
+               sha256=cmp["src_sha256"], reason=why, dst_size=cmp["dst_size"],
+               dst_sha256=cmp["dst_sha256"], suggestion_id=suggestion_id,
+               sidecars_moved=moved_sides)
+    return out | {"result": "quarantined_dst_exists", "manifest": str(batch / "manifest.jsonl"),
+                  "sidecars_moved": moved_sides}
