@@ -1,0 +1,3 @@
+/aibrarian-api-1	aibrarian	api	ghcr.io/x/api:latest	true	healthy	0	2026-10-12T10:00:00.123456789Z	false	0
+/we"ird\name			busybox	false	none	3	0001-01-01T00:00:00Z	true	137
+/worker	aibrarian	worker	img	true	starting	5	2026-10-13T04:00:00Z	false	0

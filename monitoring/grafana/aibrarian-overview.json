@@ -27,7 +27,21 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "yellow"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              }
+            ]
+          }
+        },
         "overrides": []
       },
       "targets": [
@@ -48,7 +62,8 @@
             "lastNotNull"
           ],
           "values": false
-        }
+        },
+        "colorMode": "background"
       }
     },
     {
@@ -66,7 +81,21 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          }
+        },
         "overrides": []
       },
       "targets": [
@@ -87,7 +116,8 @@
             "lastNotNull"
           ],
           "values": false
-        }
+        },
+        "colorMode": "background"
       }
     },
     {

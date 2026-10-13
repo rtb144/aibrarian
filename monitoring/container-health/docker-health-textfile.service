@@ -1,0 +1,16 @@
+[Unit]
+Description=Export Docker container health to node_exporter textfile (docker_health.prom)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+Environment=OUTPUT=/opt/stacks/monitoring/node_textfile/docker_health.prom
+ExecStart=/usr/local/bin/docker-health-textfile.sh
+TimeoutStartSec=45
+Nice=10
+# Needs the docker socket (root). Light hardening that still allows that:
+ProtectSystem=full
+ReadWritePaths=/opt/stacks/monitoring/node_textfile
+PrivateTmp=yes
+NoNewPrivileges=yes

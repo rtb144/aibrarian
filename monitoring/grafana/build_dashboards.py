@@ -1,5 +1,5 @@
 # ruff: noqa: E501, E741
-"""Generate the TV-playlist dashboards (aibrarian-{pipeline,library,gpu,host}.json).
+"""Generate the TV-playlist dashboards (aibrarian-{pipeline,library,gpu,host,containers}.json).
 
 Run: python monitoring/grafana/build_dashboards.py  (pure stdlib, writes next to this file).
 Each dashboard fits one 1080p screen (<= 28 grid rows), refresh 30s, last 6h,
@@ -56,12 +56,26 @@ def dash(uid, title, panels):
             "editable": True, "graphTooltip": 1, "panels": panels}
 
 
+
+def fixed_color(color):
+    """fieldConfig defaults for a fixed-color stat (thresholds base matches)."""
+    return {
+        "defaults": {
+            "color": {"mode": "fixed", "fixedColor": color},
+            "thresholds": {"mode": "absolute", "steps": [{"color": color, "value": None}]},
+        },
+        "overrides": [],
+    }
+
+
 def pipeline():
     return dash("aibrarian-pipeline", "aibrarian · Pipeline", [
         panel("stat", "Items not yet cataloged", "Media items still in the pipeline (excl. failed/skipped/needs_review). Postgres via API.",
-              0, 0, 6, 7, [(f"max(aib_backlog_items{{{API}}})", "not cataloged")]),
+              0, 0, 6, 7, [(f"max(aib_backlog_items{{{API}}})", "not cataloged")],
+              fieldConfig=fixed_color("yellow")),
         panel("stat", "Failed items", "Media items failed after max attempts. Postgres via API.",
-              6, 0, 6, 7, [(f'max(aib_media_items{{{API},stage="failed"}})', "failed")]),
+              6, 0, 6, 7, [(f'max(aib_media_items{{{API},stage="failed"}})', "failed")],
+              fieldConfig=fixed_color("red")),
         panel("stat", "Needs review", "Items waiting for manual review. Postgres via API.",
               12, 0, 6, 7, [(f'max(aib_media_items{{{API},stage="needs_review"}})', "needs review")]),
         panel("stat", "Actions / hour", "Pipeline actions completed in the last hour, all workers.",
@@ -141,8 +155,84 @@ def host():
     ])
 
 
+RUNNING = "(max by (name) (docker_container_running) == 1)"
+
+
+def _map(v, text, color):
+    return {"type": "value", "options": {str(v): {"text": text, "color": color}}}
+
+
+def containers():
+    """Docker container health (textfile metrics from monitoring/container-health) + cAdvisor,
+    with cAdvisor panels joined on docker_container_running == 1 so stopped containers vanish."""
+    def stat(title, desc, x, expr, steps):
+        p = panel("stat", title, desc, x, 0, 4, 5, [(expr, title)])
+        p["options"]["textMode"] = "value"
+        p["options"]["graphMode"] = "none"
+        p["fieldConfig"]["defaults"]["thresholds"] = {"mode": "absolute", "steps": [
+            {"color": c, "value": v} for v, c in steps]}
+        p["fieldConfig"]["defaults"]["color"] = {"mode": "thresholds"}
+        return p
+    base = [None, "green"]
+    stats = [
+        stat("Running", "Containers in running state.", 0, "sum(docker_container_running) or vector(0)", [base]),
+        stat("Unhealthy", "Containers whose Docker healthcheck reports unhealthy.", 4,
+             'sum(docker_container_health_status{status="unhealthy"}) or vector(0)', [base, (1, "red")]),
+        stat("Starting", "Containers whose healthcheck is still in 'starting'.", 8,
+             'sum(docker_container_health_status{status="starting"}) or vector(0)', [base, (1, "yellow")]),
+        stat("Stopped", "Containers that exist but are not running (exited/created).", 12,
+             "count(docker_container_running == 0) or vector(0)", [[None, "text"], (1, "#808080")]),
+        stat("Restarts (1h)", "Docker restart-policy restarts over the last hour (all containers).", 16,
+             "sum(clamp_min(delta(docker_container_restart_count[1h]), 0)) or vector(0)", [base, (1, "yellow"), (5, "red")]),
+        stat("Exporter age", "Seconds since docker-health-textfile last ran (timer runs every 30s).", 20,
+             "time() - max(docker_health_textfile_last_run_timestamp)", [base, (90, "yellow"), (300, "red")]),
+    ]
+    stats[-1]["fieldConfig"]["defaults"]["unit"] = "s"
+
+    table = panel("table", "Containers", "All containers: health (Docker healthcheck), running state, restarts, uptime.",
+                  0, 5, 12, 23, [
+                      ("max by (name, compose_project) (docker_container_healthy)", ""),
+                      ("max by (name) (docker_container_running)", ""),
+                      ("max by (name) (docker_container_restart_count)", ""),
+                      (f"time() - max by (name) (docker_container_started_seconds) and on (name) {RUNNING}", "")])
+    for t in table["targets"]:
+        t.update({"instant": True, "format": "table"})
+    table["transformations"] = [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {
+            "excludeByName": {"Time": True},
+            "indexByName": {"name": 0, "compose_project": 1, "Value #A": 2, "Value #B": 3, "Value #C": 4, "Value #D": 5},
+            "renameByName": {"name": "Container", "compose_project": "Project", "Value #A": "Health",
+                             "Value #B": "State", "Value #C": "Restarts", "Value #D": "Uptime"}}},
+        {"id": "sortBy", "options": {"sort": [{"field": "Health"}]}}]
+    table["options"] = {"showHeader": True, "cellHeight": "sm", "footer": {"show": False}}
+    cell = {"type": "color-background", "mode": "basic"}
+    table["fieldConfig"]["overrides"] = [
+        {"matcher": {"id": "byName", "options": "Health"}, "properties": [
+            {"id": "mappings", "value": [_map(1, "healthy", "green"), _map(0, "unhealthy", "red"),
+                                         _map(0.5, "starting", "yellow"), _map(-1, "none", "#808080")]},
+            {"id": "custom.cellOptions", "value": cell}, {"id": "custom.width", "value": 110}]},
+        {"matcher": {"id": "byName", "options": "State"}, "properties": [
+            {"id": "mappings", "value": [_map(1, "running", "green"), _map(0, "stopped", "#808080")]},
+            {"id": "custom.cellOptions", "value": cell}, {"id": "custom.width", "value": 100}]},
+        {"matcher": {"id": "byName", "options": "Restarts"}, "properties": [
+            {"id": "custom.width", "value": 90}]},
+        {"matcher": {"id": "byName", "options": "Uptime"}, "properties": [
+            {"id": "unit", "value": "s"}, {"id": "decimals", "value": 0}]}]
+
+    cpu = panel("timeseries", "CPU per running container (cores)",
+                "cAdvisor CPU usage, only containers currently running (joined with docker_container_running == 1).",
+                12, 5, 12, 11,
+                [(f'sum by (name) (rate(container_cpu_usage_seconds_total{{name!=""}}[2m])) and on (name) {RUNNING}', "{{name}}")])
+    mem = panel("timeseries", "Memory per running container",
+                "cAdvisor working-set memory, only containers currently running.", 12, 16, 12, 12,
+                [(f'max by (name) (container_memory_working_set_bytes{{name!=""}}) and on (name) {RUNNING}', "{{name}}")],
+                unit="bytes")
+    return dash("aibrarian-containers", "aibrarian · Containers (z8g4)", stats + [table, cpu, mem])
+
+
 if __name__ == "__main__":
     here = Path(__file__).parent
-    for name, fn in [("pipeline", pipeline), ("library", library), ("gpu", gpu), ("host", host)]:
+    for name, fn in [("pipeline", pipeline), ("library", library), ("gpu", gpu), ("host", host), ("containers", containers)]:
         _id = 0
         (here / f"aibrarian-{name}.json").write_text(json.dumps(fn(), indent=2) + "\n")

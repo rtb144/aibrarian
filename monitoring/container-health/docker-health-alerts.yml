@@ -1,0 +1,36 @@
+# Prometheus alert rules for docker-health-textfile metrics.
+# Wiring: copy to /opt/stacks/monitoring/prometheus/rules/ and add to prometheus.yml:
+#   rule_files:
+#     - /etc/prometheus/rules/*.yml
+# (path as seen INSIDE the prometheus container; see README). No Alertmanager needed to
+# see them firing at http://192.168.68.52:9090/alerts.
+groups:
+  - name: docker-container-health
+    rules:
+      - alert: DockerContainerUnhealthy
+        expr: max by (name, compose_project) (docker_container_health_status{status="unhealthy"}) == 1
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Container {{ $labels.name }} is unhealthy"
+          description: "Docker healthcheck for {{ $labels.name }} ({{ $labels.compose_project }}) has been unhealthy for >2m."
+      - alert: DockerContainerRestartLoop
+        expr: max by (name, compose_project) (delta(docker_container_restart_count[15m])) >= 3
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "Container {{ $labels.name }} is restarting repeatedly"
+          description: "{{ $labels.name }} restarted {{ $value }} times in the last 15m."
+      - alert: DockerContainerOOMKilled
+        expr: max by (name) (docker_container_oom_killed) == 1 and on (name) max by (name) (docker_container_running) == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Container {{ $labels.name }} was OOM-killed"
+      - alert: DockerHealthTextfileStale
+        expr: time() - max(docker_health_textfile_last_run_timestamp) > 300 or absent(docker_health_textfile_last_run_timestamp)
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "docker_health.prom is stale (timer not running?)"
+          description: "Check: systemctl status docker-health-textfile.timer; journalctl -u docker-health-textfile.service"
