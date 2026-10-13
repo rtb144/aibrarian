@@ -562,3 +562,15 @@ worker containers, wiped at worker start). Don't set that variable on the API.
 - Resume skips every book suggestion's source path (any status, incl. failed/error), targets of
   applied suggestions, and anything under `CALIBRE_DIR`. The start line shows the breakdown:
   `book-scan start: total=N (progress every 900s) files_found=F skipped=S (video=.. suggested=.. applied=.. in_calibre=..) ...`
+
+## Downloads triage (read-only)
+
+`aibrarian downloads triage [--root /media/downloads] [--json] [--out /data/reports/downloads-triage.json] [--depth 1] [--max-hash 500]`
+classifies each top-level downloads entry (numbered category dirs like `2-books` are expanded)
+as in_library_movie / in_library_book / moved_already / pending_book / pending_video / archive /
+software / audio / junk / unknown with a suggested action (`quarantine_safe` only for library
+copies >= the download, moved_already and junk). Nothing is moved; the catalog is read in a
+READ ONLY transaction without advisory locks and Calibre's metadata.db with `mode=ro`, so it is
+safe while book-scan runs. Writes the JSON report and a CSV next to it. Content is sample-hashed
+only on exact size matches, capped by `--max-hash`.
+Run: `docker compose exec aibrarian-api aibrarian --plain-logs downloads triage`.

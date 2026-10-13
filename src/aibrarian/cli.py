@@ -171,6 +171,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--include-no-video", action="store_true",
                     help="also quarantine srts of dirs that have no video")
 
+    dl = sub.add_parser("downloads", help="downloads folder tools (read-only)")
+    dls = dl.add_subparsers(dest="dl_cmd", required=True)
+    dt = dls.add_parser("triage", help="READ-ONLY report: classify each downloads entry "
+                        "(in library / moved / pending / junk ...) with a suggested action")
+    dt.add_argument("--root", type=Path, help="default MEDIA_ROOT/downloads")
+    dt.add_argument("--json", action="store_true", help="print the full report as JSON")
+    dt.add_argument("--out", type=Path, help="default REPORT_DIR/downloads-triage.json "
+                    "(CSV written next to it)")
+    dt.add_argument("--depth", type=int, default=1,
+                    help="levels to descend into numbered category dirs like 2-books")
+    dt.add_argument("--max-hash", type=int, default=500,
+                    help="cap on head/tail sample hashes (only on exact size matches)")
+    dt.add_argument("--no-db", action="store_true", help="skip the catalog (junk/type only)")
+
     se = sub.add_parser("search")
     se.add_argument("query")
     se.add_argument("--mode", default="hybrid", choices=["hybrid", "semantic", "keyword"])
@@ -367,6 +381,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
                 print("no index at " + str(s.ol_index_path), file=sys.stderr)
                 return 1
             _print(idx.lookup(args.title, args.author, args.isbn))
+        return 0
+
+    if cmd == "downloads":
+        from . import downloads
+        from .booklib import make_calibre
+        from .db import Database
+
+        db = None if args.no_db else Database.from_settings(s)
+        cat = downloads.load_catalog(db, make_calibre(s))
+        root = args.root or Path(s.media_root) / "downloads"
+        rep = downloads.triage(root, cat, calibre_dir=Path(s.calibre_dir),
+                               music_dir=Path(s.media_root) / "03-music", depth=args.depth,
+                               max_hash=args.max_hash)
+        out = args.out or Path(s.report_dir) / "downloads-triage.json"
+        jp, cp = downloads.write_reports(rep, out)
+        if args.json:
+            _print(rep)
+        else:
+            print(downloads.format_summary(rep) + f"\nreports: {jp} {cp}")
         return 0
 
     ctx = _ctx()
