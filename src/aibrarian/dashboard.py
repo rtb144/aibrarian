@@ -381,3 +381,44 @@ async function mark(id,review){
 }
 load();
 </script></body></html>"""
+
+
+CHANGES_UI_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>aibrarian · change log</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:1.5em;background:#111;color:#ddd}
+table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #333;padding:4px 6px;
+vertical-align:top;text-align:left}th{background:#222}input,select{background:#222;color:#ddd}
+.path{color:#aaa;font-size:12px;word-break:break-all}.pending{color:#fc6}.failed{color:#e77}
+.rolled_back{color:#e9e}.committed{color:#7c7}.card{display:inline-block;background:#1c1c1c;
+padding:6px 10px;margin:0 8px 8px 0;border-radius:4px}</style></head><body>
+<h2>Change log <small style="color:#888">(aib.change_log, read-only)</small></h2>
+<div id="cons"></div>
+<p>day <input id="day" type="date"> pipeline <input id="pipeline" placeholder="prefect:… / cli">
+op <select id="op"><option value="">any</option><option>move</option><option>rename</option>
+<option>quarantine</option><option>restore</option><option>relink</option>
+<option>update_path</option><option>delete_row</option><option>insert</option></select>
+status <select id="status"><option value="">any</option><option>pending</option>
+<option>committed</option><option>failed</option><option>rolled_back</option></select>
+path <input id="path" placeholder="substring" size="30"> <button onclick="load()">reload</button>
+<span id="total"></span></p>
+<table><thead><tr><th>id</th><th>time</th><th>status</th><th>pipeline</th><th>op</th>
+<th>entity</th><th>old path &rarr; new path</th><th>error</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function cons(){const r=await fetch('/consistency');if(!r.ok){return}
+ const j=await r.json();const c=j.counts||{};
+ document.getElementById('cons').innerHTML='<b>consistency '+esc(j.generated_at)+'</b><br>'+
+ Object.entries(c).filter(([k,v])=>v).map(([k,v])=>'<span class="card">'+esc(k)+': '+v+'</span>').join('')
+ +' <a href="/consistency" style="color:#8af">json</a>';}
+async function load(){const p=new URLSearchParams();
+ for(const k of ['day','pipeline','op','status','path']){const v=document.getElementById(k).value;if(v)p.set(k,v)}
+ p.set('limit','500');const j=await (await fetch('/changes?'+p)).json();
+ document.getElementById('total').textContent=j.changes.length+' of '+j.total;
+ document.getElementById('rows').innerHTML=j.changes.map(r=>'<tr><td>'+r.id+'</td><td>'+
+ esc((r.ts||'').slice(0,19).replace('T',' '))+'</td><td class="'+esc(r.status)+'">'+esc(r.status)+
+ '</td><td>'+esc(r.actor)+'</td><td>'+esc(r.op)+'</td><td>'+esc(r.entity)+(r.entity_id?' #'+r.entity_id:'')+
+ '</td><td class="path">'+esc(r.old_path)+'<br>&rarr; '+esc(r.new_path)+'</td><td class="failed">'+
+ esc(r.error)+'</td></tr>').join('');}
+cons();load();
+</script></body></html>"""

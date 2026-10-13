@@ -456,6 +456,70 @@ dc exec aibrarian-api aibrarian embed-eval query "scene where they argue about t
 dc exec aibrarian-api aibrarian embed-eval cleanup
 ```
 
+## Consistency check and change log (`consistency`, `aib.change_log`)
+
+Several pipelines move or rename files (suggestion apply, dedup quarantine/restore,
+dst-exists quarantine, `transcripts requeue-lang`, book autoapply, Calibre adopt) while
+others reference paths (`aib.transcript_lang`, suggestions, `file_hash`, sidecars).
+
+**Change log.** Every one of those moves now goes through `aibrarian.changelog.change()`:
+
+1. non-blocking Postgres advisory lock per path (`hashtextextended(path, 0)`) and per media
+   id; held elsewhere -> the move is skipped as `busy` (nothing touched). A media row with a
+   fresh stage lease (`locked_by`, < 6 h) is also `busy`. `Database.claim` takes the same
+   path key, so a stage never claims a file that is being moved;
+2. an `aib.change_log` row is committed as `pending`;
+3. the filesystem op runs (video + sidecars);
+4. one DB transaction repoints `media_file.path` and every dependent path column
+   (`transcript_lang.path`, `file_hash.path`, open `suggestion.source_path`;
+   `aib.transcript`/`segment` hang off the media id) and marks the row `committed`;
+5. on error the filesystem op is undone where possible (`rolled_back`) or the row is `failed`.
+
+`Database.update_path` cascades the same way. A `pending` row older than ~30 min = a crashed
+or half-done change; the `consistency` flow reports it (`pending_stale`).
+
+    aibrarian changes --day 2026-10-13 --pipeline prefect:book-autoapply --op move
+    aibrarian changes --path "Iron Man 2" --status failed
+    http://<host>:8790/changes/ui      # filter by day / pipeline / op / status / path
+    http://<host>:8790/changes?op=quarantine&day=2026-10-13
+
+**Consistency check (read-only).**
+
+    aibrarian consistency check                 # summary + 5 examples per class
+    aibrarian consistency check --fix-plan      # + what `fix` would do (dry run)
+    aibrarian consistency check --json > /tmp/consistency.json
+    http://<host>:8790/consistency              # latest report (?full=true for all items)
+
+Each `*.transcript.json` under the transcribe roots is classified (see the module docstring
+of `aibrarian/consistency.py`): `row_not_transcribed`, `row_flagged_missing`,
+`stale_row_path`, `needs_scan`, `stem_mismatch`, `stem_mismatch_review`,
+`duplicate_transcript`, `orphan_video_moved`, `orphan`. Also reported: rows whose path is
+gone (`row_path_missing`), `transcript_lang`/suggestion/file_op paths pointing at missing
+files, videos without a row, rows sharing one inode, `stranded_transcript_twin` (the
+transcript/segments sit on a missing row while the same file - same fingerprint - lives on
+under a new row without transcript), and `pending_stale`. `no_media_breakdown` maps the
+`requeue-lang` NO_MEDIA rows (`transcript_lang.media_id IS NULL`) to these classes.
+
+The `consistency` Prefect deployment (cpu group, every 30 min, one run at a time) runs the
+same check, logs progress, writes `REPORT_DIR/consistency.json` and never fixes anything.
+The API exposes it as `aib_consistency_issues{issue=...}`,
+`aib_consistency_last_run_timestamp_seconds` and the live `aib_change_log_pending{age=all|stale}`.
+
+**Fixes (explicit, safe classes only, dry run by default).**
+
+    aibrarian consistency fix                         # what would change
+    aibrarian consistency fix --execute --only stem_mismatch --limit 20
+    aibrarian consistency fix --execute               # stem_mismatch + stale_row_path
+
+* `stem_mismatch`: rename `<old stem>.transcript.json` (+ `.srt`) to the stem of the single
+  plausible video in the same directory (title similarity >= 0.6, cd/part number must match);
+* `stale_row_path`: repoint a row whose path is gone to the file found by size+name (or
+  fingerprint) that has no row yet (`missing` cleared).
+
+Each fix is re-verified right before it runs, logged in `aib.change_log` (`relink` /
+`update_path`) and never overwrites, deletes files or deletes rows. Everything else is
+report-only with a hint (run `discover`, manual merge, quarantine the orphan, ...).
+
 ## Monitoring (existing Prometheus/Grafana in /opt/stacks/monitoring)
 
 1. Append the jobs in `monitoring/prometheus/aibrarian-scrape.yml` under `scrape_configs:` in

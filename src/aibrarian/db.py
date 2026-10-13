@@ -44,6 +44,47 @@ def _dumps(obj, **kw):
 
 
 MIGRATIONS_PKG = "aibrarian.migrations"
+PATH_LOCK_NS = 724420  # int4 namespace for per-media-id move locks
+TRANSCRIPT_SUFFIX = ".transcript.json"
+
+
+def _sidecar(path: str, suffix: str) -> str:
+    from pathlib import PurePosixPath
+
+    return str(PurePosixPath(path).with_suffix(suffix))
+
+
+def cascade_path(c: psycopg.Connection, old: str, new: str, *,
+                 unmissing: bool = False) -> int | None:
+    """Inside an open transaction: repoint media_file + every dependent path column.
+
+    Never overwrites a row that already holds ``new`` (UNIQUE paths): such rows are
+    left for ``aibrarian consistency check`` to report."""
+    row = c.execute("UPDATE aib.media_file SET path=%s, "
+                    "missing = CASE WHEN %s THEN FALSE ELSE missing END WHERE path=%s "
+                    "RETURNING id", (new, unmissing, old)).fetchone()
+    mid = row["id"] if row else None
+    ot, nt = _sidecar(old, TRANSCRIPT_SUFFIX), _sidecar(new, TRANSCRIPT_SUFFIX)
+    for o, n in ((ot, nt), (old, new)):  # 'old' itself may be a .transcript.json (relink)
+        if not o.endswith(TRANSCRIPT_SUFFIX):
+            continue
+        c.execute("UPDATE aib.transcript_lang SET path=%s, media_id=COALESCE(%s, media_id) "
+                  "WHERE path=%s AND NOT EXISTS (SELECT 1 FROM aib.transcript_lang x "
+                  "WHERE x.path=%s)", (n, mid, o, n))
+    c.execute("UPDATE aib.file_hash SET path=%s WHERE path=%s AND NOT EXISTS "
+              "(SELECT 1 FROM aib.file_hash x WHERE x.path=%s)", (new, old, new))
+    c.execute("UPDATE aib.suggestion s SET source_path=%s WHERE s.source_path=%s "
+              "AND s.status IN ('open','needs_review') AND NOT EXISTS (SELECT 1 FROM "
+              "aib.suggestion x WHERE x.domain=s.domain AND x.source_path=%s)", (new, old, new))
+    return mid
+
+
+def _finish_change(c: psycopg.Connection, change_id: int, status: str, error: str | None,
+                   entity_id: int | None, details: dict[str, Any] | None = None) -> None:
+    c.execute("UPDATE aib.change_log SET status=%s, error=%s, finished_at=now(), "
+              "entity_id=COALESCE(%s, entity_id), details = details || %s::jsonb WHERE id=%s",
+              (status, error[:4000] if error else None, entity_id, _dumps(details or {}),
+               change_id))
 
 
 def list_migrations() -> list[tuple[str, str]]:
@@ -251,11 +292,12 @@ class Database:
             c.commit()
 
     def quarantine_media(self, media_id: int, old_path: str, new_path: str, started_at: Any,
-                         details: dict[str, Any]) -> None:
+                         details: dict[str, Any], change_id: int | None = None) -> None:
         """Repoint a quarantined copy, mark it missing + skipped, log a media_event."""
         with self.conn() as c:
             row = c.execute("SELECT stage FROM aib.media_file WHERE id=%s", (media_id,)).fetchone()
             prev = row["stage"] if row else None
+            cascade_path(c, old_path, new_path)  # transcript_lang etc. follow the copy
             c.execute("UPDATE aib.media_file SET path=%s, missing=TRUE, stage='skipped', "
                       "last_error=%s, locked_by=NULL, stage_changed_at=now() WHERE id=%s",
                       (new_path, f"quarantined duplicate of {details.get('keeper')}", media_id))
@@ -264,19 +306,26 @@ class Database:
                            'ok',%s,%s)""",
                       (media_id, prev, started_at,
                        _dumps(details | {"from": old_path, "to": new_path})))
+            if change_id is not None:
+                _finish_change(c, change_id, "committed", None, media_id)
             c.commit()
 
     def restore_media(self, media_id: int, quarantine_path: str, path: str, stage: str,
-                      started_at: Any) -> None:
+                      started_at: Any, change_id: int | None = None) -> None:
         with self.conn() as c:
+            if c.execute("SELECT 1 FROM aib.media_file WHERE id=%s AND path=%s",
+                         (media_id, quarantine_path)).fetchone():
+                cascade_path(c, quarantine_path, path)
             c.execute("UPDATE aib.media_file SET path=%s, missing=FALSE, stage=%s, "
-                      "last_error=NULL, stage_changed_at=now() WHERE id=%s AND path=%s",
-                      (path, stage, media_id, quarantine_path))
+                      "last_error=NULL, stage_changed_at=now() WHERE id=%s AND path IN (%s, %s)",
+                      (path, stage, media_id, quarantine_path, path))
             c.execute("""INSERT INTO aib.media_event (media_id, action, from_stage, to_stage,
                            outcome, started_at, details) VALUES (%s,'restore','skipped',%s,
                            'ok',%s,%s)""",
                       (media_id, stage, started_at,
                        _dumps({"from": quarantine_path, "to": path})))
+            if change_id is not None:
+                _finish_change(c, change_id, "committed", None, media_id)
             c.commit()
 
     def purge_media(self, media_id: int, path: str, started_at: Any,
@@ -404,13 +453,135 @@ class Database:
                              "GROUP BY 1 ORDER BY 2 DESC").fetchall()
         return {r["l"]: r["n"] for r in rows}
 
-    def update_path(self, old: str, new: str) -> int | None:
-        """Repoint the catalog row (segments/transcripts hang off its id). Returns id."""
+    def update_path(self, old: str, new: str, *, change_id: int | None = None,
+                    unmissing: bool = False) -> int | None:
+        """Repoint the catalog row and cascade to every table holding the path.
+
+        One transaction: ``media_file.path`` plus the dependent path columns
+        (``transcript_lang.path`` of the ``.transcript.json`` sidecar, ``file_hash.path``,
+        open suggestions' ``source_path``); ``aib.transcript``/``segment`` hang off the
+        media id and need nothing. With ``change_id`` the aib.change_log row is marked
+        committed in the same transaction. Returns the media id (or None)."""
         with self.conn() as c:
-            row = c.execute("UPDATE aib.media_file SET path=%s WHERE path=%s RETURNING id",
-                            (new, old)).fetchone()
+            mid = cascade_path(c, old, new, unmissing=unmissing)
+            if change_id is not None:
+                _finish_change(c, change_id, "committed", None, mid)
             c.commit()
-        return row["id"] if row else None
+        return mid
+
+    # -- change log (aib.change_log) ----------------------------------------
+    CHANGE_COLS = ("actor", "run_id", "txn_id", "op", "entity", "entity_id", "old_path",
+                   "new_path", "sha256", "size_bytes", "status", "error", "details")
+
+    def change_begin(self, row: dict[str, Any]) -> int:
+        """Insert a change_log row (default 'pending') in its own committed transaction,
+        so a crash between here and the filesystem op leaves a visible trace."""
+        vals = [_dumps(row.get(k) or {}) if k == "details" else row.get(k)
+                for k in self.CHANGE_COLS]
+        vals[self.CHANGE_COLS.index("status")] = row.get("status") or "pending"
+        with self.conn() as c:
+            r = c.execute(f"INSERT INTO aib.change_log ({', '.join(self.CHANGE_COLS)}) VALUES "
+                          f"({', '.join(['%s'] * len(vals))}) RETURNING id", vals).fetchone()
+            c.commit()
+        return r["id"]
+
+    def change_finish(self, change_id: int, status: str, error: str | None = None,
+                      entity_id: int | None = None, repoint: Sequence[tuple[str, str]] = (),
+                      unmissing: bool = False, details: dict[str, Any] | None = None
+                      ) -> int | None:
+        """Mark a change committed/failed/rolled_back. ``repoint`` (old, new) pairs are
+        cascaded (see update_path) in the SAME transaction as the status update."""
+        mid = entity_id
+        with self.conn() as c:
+            for old, new in repoint:
+                m = cascade_path(c, old, new, unmissing=unmissing)
+                mid = mid if mid is not None else m
+            _finish_change(c, change_id, status, error, mid, details)
+            c.commit()
+        return mid
+
+    def changes(self, day: str | None = None, actor: str | None = None, op: str | None = None,
+                path: str | None = None, status: str | None = None, limit: int = 200,
+                offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        where = ("(%(d)s::date IS NULL OR ts >= %(d)s::date AND ts < %(d)s::date + 1) AND "
+                 "(%(a)s::text IS NULL OR actor ILIKE %(al)s) AND "
+                 "(%(o)s::text IS NULL OR op=%(o)s) AND "
+                 "(%(st)s::text IS NULL OR status=%(st)s) AND "
+                 "(%(p)s::text IS NULL OR old_path ILIKE %(pl)s OR new_path ILIKE %(pl)s)")
+        prm = {"d": day, "a": actor, "al": f"%{actor}%", "o": op, "st": status, "p": path,
+               "pl": f"%{path}%", "lim": limit, "off": offset}
+        with self.conn() as c:
+            rows = c.execute(f"SELECT * FROM aib.change_log WHERE {where} ORDER BY id DESC "
+                             "LIMIT %(lim)s OFFSET %(off)s", prm).fetchall()
+            total = c.execute(f"SELECT count(*) AS n FROM aib.change_log WHERE {where}",
+                              prm).fetchone()["n"]
+        return rows, total
+
+    def stale_pending_changes(self, older_than_minutes: int) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM aib.change_log WHERE status='pending' AND "
+                             "ts < now() - make_interval(mins => %s) ORDER BY ts",
+                             (older_than_minutes,)).fetchall()
+
+    @contextmanager
+    def path_locks(self, keys: Sequence[str], media_ids: Sequence[int] = ()) -> Iterator[bool]:
+        """Non-blocking session advisory locks on ``hashtextextended(path, 0)`` (bigint
+        key space) and on ``(PATH_LOCK_NS, media_id)`` (int4 pair key space). Yields False
+        (holding nothing) if any of them is held elsewhere - e.g. by another move, or
+        by a stage claim in progress (Database.claim takes the same path key)."""
+        with psycopg.connect(self.dsn, autocommit=True) as c:
+            got: list[tuple[str, Any]] = []
+            ok = True
+            for k in sorted(set(keys)):
+                if c.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                             (k,)).fetchone()[0]:
+                    got.append(("p", k))
+                else:
+                    ok = False
+                    break
+            if ok:
+                for m in sorted(set(media_ids)):
+                    if c.execute("SELECT pg_try_advisory_lock(%s, %s)",
+                                 (PATH_LOCK_NS, int(m))).fetchone()[0]:
+                        got.append(("m", m))
+                    else:
+                        ok = False
+                        break
+            try:
+                yield ok and True
+            finally:
+                for kind, k in got:
+                    if kind == "p":
+                        c.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (k,))
+                    else:
+                        c.execute("SELECT pg_advisory_unlock(%s, %s)", (PATH_LOCK_NS, int(k)))
+
+    # -- consistency check (read-only) ---------------------------------------
+    def consistency_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        with self.conn() as c:
+            media = c.execute(
+                "SELECT m.id, m.path, m.root, m.kind, m.size_bytes, m.fingerprint, m.missing, "
+                "m.stage, m.title, m.locked_by, EXISTS (SELECT 1 FROM aib.transcript t "
+                "WHERE t.media_id = m.id) AS has_transcript FROM aib.media_file m "
+                "WHERE m.kind = 'video' ORDER BY m.id").fetchall()
+            tlang = c.execute("SELECT id, path, media_id, title, non_english, mismatch, review "
+                              "FROM aib.transcript_lang ORDER BY id").fetchall()
+            sugg = c.execute("SELECT id, domain, source_path, target_path, status FROM "
+                             "aib.suggestion WHERE status IN ('open','needs_review') "
+                             "ORDER BY id").fetchall()
+            fops = c.execute(
+                "SELECT DISTINCT ON (src) id, op, src, dst, result, created_at FROM aib.file_op "
+                "WHERE result='ok' ORDER BY src, id DESC").fetchall()
+            try:
+                changes = c.execute(
+                    "SELECT id, ts, op, entity, old_path, new_path, status FROM aib.change_log "
+                    "WHERE status='committed' AND op IN ('move','rename','quarantine','relink',"
+                    "'update_path') ORDER BY id").fetchall()
+            except psycopg.errors.UndefinedTable:
+                c.rollback()
+                changes = []
+        return {"media": media, "transcript_lang": tlang, "suggestions": sugg,
+                "file_ops": fops, "changes": changes}
 
     def update_media_fields(self, media_id: int, **fields: Any) -> None:
         allowed = {"duration_s", "probe", "audio_path", "jellyfin_id", "title", "year",
@@ -438,6 +609,8 @@ class Database:
             WHERE stage=%s AND NOT missing AND kind='video'
               AND (%s::text[] IS NULL OR root = ANY(%s::text[]))
               AND (locked_at IS NULL OR locked_at < now() - make_interval(mins => %s))
+              -- a move in progress holds this key (Database.path_locks): skip the item
+              AND pg_try_advisory_xact_lock(hashtextextended(path, 0))
             ORDER BY stage_changed_at LIMIT %s
             FOR UPDATE SKIP LOCKED)
         RETURNING *

@@ -27,6 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from aibrarian import changelog
 from aibrarian.duplicates import full_hash  # absolute: Prefect-safe
 
 log = logging.getLogger(__name__)
@@ -199,22 +200,40 @@ def execute(p: dict[str, Any], db=None, hasher=full_hash,
             from aibrarian.sidecars import related_sidecars
             sides = [(sp, dst.with_name(dst.stem + sp.name[len(src.stem):]))
                      for sp in related_sidecars(src)]
-            os.rename(src, dst)
-            moved_sides = []
-            for sp, sd in sides:
-                if not sd.exists():
-                    os.rename(sp, sd)
-                    moved_sides.append({"from": str(sp), "to": str(sd)})
-            rec = {"moved_at": datetime.now(UTC).isoformat(), "group": it["group"],
-                   "media_id": it["media_id"], "size_bytes": it["size_bytes"],
-                   "keeper": it["keeper"], "path": it["path"], "quarantine_path": str(dst),
-                   "prev_stage": it.get("stage"), "sidecars_copied_to_keeper": copied,
-                   "sidecars_moved": moved_sides}
-            _write_manifest(batch, rec)
-            if db is not None and it["media_id"]:
-                db.quarantine_media(it["media_id"], it["path"], str(dst), started,
-                                    {"keeper": it["keeper"], "group": it["group"],
-                                     "sidecars_copied_to_keeper": copied})
+            try:
+                with changelog.change(db, "quarantine", "media_file", old_path=src,
+                                      new_path=dst, entity_id=it["media_id"] or None,
+                                      source=source, sha256=sha, size_bytes=it["size_bytes"],
+                                      details={"group": it["group"],
+                                               "keeper": it["keeper"]}) as ch:
+                    os.rename(src, dst)
+                    ch.add_undo(lambda src=src, dst=dst: os.rename(dst, src))
+                    moved_sides = []
+                    for sp, sd in sides:
+                        if not sd.exists():
+                            os.rename(sp, sd)
+                            moved_sides.append({"from": str(sp), "to": str(sd)})
+                            ch.add_undo(lambda sp=sp, sd=sd: os.rename(sd, sp))
+                    ch.sidecars([(m["from"], m["to"]) for m in moved_sides])
+                    rec = {"moved_at": datetime.now(UTC).isoformat(), "group": it["group"],
+                           "media_id": it["media_id"], "size_bytes": it["size_bytes"],
+                           "keeper": it["keeper"], "path": it["path"],
+                           "quarantine_path": str(dst), "prev_stage": it.get("stage"),
+                           "sidecars_copied_to_keeper": copied, "sidecars_moved": moved_sides}
+                    if db is not None and it["media_id"]:
+                        kw = {"change_id": ch.id} if ch.id is not None else {}
+                        db.quarantine_media(it["media_id"], it["path"], str(dst), started,
+                                            {"keeper": it["keeper"], "group": it["group"],
+                                             "sidecars_copied_to_keeper": copied}, **kw)
+                        if ch.id is not None:
+                            ch.committed_by_caller()
+                _write_manifest(batch, rec)
+            except changelog.Busy as exc:
+                results.append(res | {"result": "skipped", "reason": str(exc)})
+                say(f"[{k}/{n}] SKIPPED (busy: {exc}) {src}")
+                log_action(root, db, source, action="skip", sha256=sha, reason=f"busy: {exc}",
+                           **base)
+                continue
             results.append(res | {"result": "moved", "sidecars_copied_to_keeper": copied})
             log_action(root, db, source, action="quarantine", sha256=sha,
                        sidecars_copied=copied, **base)
@@ -268,15 +287,32 @@ def restore(manifest: Path, execute: bool = False, db=None,
             continue
         started = datetime.now(UTC)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(src, dst)
-        for s in r.get("sidecars_moved", []):
-            if Path(s["to"]).exists() and not Path(s["from"]).exists():
-                os.rename(s["to"], s["from"])
+        try:
+            with changelog.change(db, "restore", "media_file" if r.get("media_id") else
+                                  "transcript" if r.get("transcript_media_id") else "file",
+                                  old_path=src, new_path=dst,
+                                  entity_id=r.get("media_id") or r.get("transcript_media_id"),
+                                  source=source, check_lease=bool(r.get("media_id")),
+                                  details={"manifest": str(manifest)}) as ch:
+                os.rename(src, dst)
+                ch.add_undo(lambda src=src, dst=dst: os.rename(dst, src))
+                back = []
+                for s in r.get("sidecars_moved", []):
+                    if Path(s["to"]).exists() and not Path(s["from"]).exists():
+                        os.rename(s["to"], s["from"])
+                        back.append((s["to"], s["from"]))
+                ch.sidecars(back)
+                if db is not None and r.get("media_id"):
+                    kw = {"change_id": ch.id} if ch.id is not None else {}
+                    db.restore_media(r["media_id"], r["quarantine_path"], r["path"],
+                                     r.get("prev_stage") or "discovered", started, **kw)
+                    if ch.id is not None:
+                        ch.committed_by_caller()
+        except changelog.Busy as exc:
+            out.append(item | {"result": "skipped", "reason": f"busy: {exc}"})
+            continue
         with restored_log.open("a") as fh:
             fh.write(json.dumps({"path": r["path"], "at": started.isoformat()}) + "\n")
-        if db is not None and r.get("media_id"):
-            db.restore_media(r["media_id"], r["quarantine_path"], r["path"],
-                             r.get("prev_stage") or "discovered", started)
         if db is not None and r.get("suggestion_id") and hasattr(db, "set_suggestion_status"):
             db.set_suggestion_status(r["suggestion_id"], "open")  # dst_exists undo: retry later
         out.append(item | {"result": "restored"})
@@ -695,12 +731,29 @@ def quarantine_dst_exists(src: Path, dst: Path, settings, *, apply: bool, db=Non
         return out | {"result": "error",
                       "error": "quarantine dir is on another filesystem; refusing slow copy"}
     try:
-        os.rename(src, qdst)
-        moved_sides = []
-        for sp, sd in sides:
-            if sp.exists() and not sd.exists():
-                os.rename(sp, sd)
-                moved_sides.append({"from": str(sp), "to": str(sd)})
+        with changelog.change(db, "quarantine", "media_file" if media_id else "file",
+                              old_path=src, new_path=qdst, entity_id=media_id, source=source,
+                              sha256=cmp["src_sha256"], size_bytes=cmp["src_size"],
+                              details={"reason": "dst_exists", "keeper": str(dst),
+                                       "suggestion_id": suggestion_id}) as ch:
+            os.rename(src, qdst)
+            ch.add_undo(lambda: os.rename(qdst, src))
+            moved_sides = []
+            for sp, sd in sides:
+                if sp.exists() and not sd.exists():
+                    os.rename(sp, sd)
+                    moved_sides.append({"from": str(sp), "to": str(sd)})
+                    ch.add_undo(lambda sp=sp, sd=sd: os.rename(sd, sp))
+            ch.sidecars([(m["from"], m["to"]) for m in moved_sides])
+            if media_id and db is not None and hasattr(db, "quarantine_media"):
+                kw = {"change_id": ch.id} if ch.id is not None else {}
+                db.quarantine_media(media_id, str(src), str(qdst), started,
+                                    {"keeper": str(dst), "reason": "dst_exists",
+                                     "comparison": cmp["comparison"]}, **kw)
+                if ch.id is not None:
+                    ch.committed_by_caller()
+    except changelog.Busy as exc:
+        return out | {"result": "error", "error": f"busy: {exc}"}
     except OSError as exc:
         return out | {"result": "error", "error": str(exc)}
     rec = {"moved_at": started.isoformat(), "group": None, "media_id": media_id,
@@ -712,10 +765,6 @@ def quarantine_dst_exists(src: Path, dst: Path, settings, *, apply: bool, db=Non
            "larger": cmp["larger"], "sidecars_copied_to_keeper": [],
            "sidecars_moved": moved_sides}
     _write_manifest(batch, rec)
-    if db is not None and media_id and hasattr(db, "quarantine_media"):
-        db.quarantine_media(media_id, str(src), str(qdst), started,
-                            {"keeper": str(dst), "reason": "dst_exists",
-                             "comparison": cmp["comparison"]})
     why = f"dst_exists:{cmp['comparison']}" + (f",larger={cmp['larger']}"
                                                 if cmp["larger"] else "")
     log_action(root, db, source, action="quarantine", media_id=media_id, keeper_path=str(dst),

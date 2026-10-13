@@ -31,6 +31,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from aibrarian import changelog
 from aibrarian.probe import media_info, run_ffprobe, select_audio_stream
 from aibrarian.quarantine import _qpath, _write_manifest, log_action
 from aibrarian.sidecars import srt_path, transcript_path
@@ -161,19 +162,35 @@ def execute(ctx, p: dict[str, Any], source: str | None = "cli") -> dict[str, Any
             continue
         started = datetime.now(UTC)
         try:
-            moved = [m for m in (_move(transcript_path(video), batch, roots),
-                                 _move(srt_path(video), batch, roots)) if m]
+            with changelog.change(ctx.db, "quarantine", "transcript",
+                                  old_path=transcript_path(video), entity_id=mid,
+                                  media_ids=[mid], extra_lock_paths=[video], source=source,
+                                  check_lease=False, details={"reason": REASON}) as ch:
+                moved = [m for m in (_move(transcript_path(video), batch, roots),
+                                     _move(srt_path(video), batch, roots)) if m]
+                for m in moved:
+                    ch.add_undo(lambda m=m: os.rename(m["to"], m["from"]))
+                ch.details["moved"] = moved
+                ok = ctx.db.transition(mid, "reset", stage, str(RESET_TO), "ok", started,
+                                       details={"reason": REASON,
+                                                "detected_lang": it.get("detected_lang"),
+                                                "used_stream": it.get("used"),
+                                                "new_stream": it.get("chosen"),
+                                                "moved": moved})
+                if not ok:  # stage changed under us: put the transcript back, touch nothing
+                    for m in moved:
+                        if not Path(m["from"]).exists():
+                            os.rename(m["to"], m["from"])
+                    ch.fail("stage changed concurrently")
+                else:
+                    ch.sidecars([(m["from"], m["to"]) for m in moved[1:]])
+        except changelog.Busy as exc:
+            results.append(it | {"result": "skipped", "reason": f"busy: {exc}"})
+            continue
         except OSError as exc:
             results.append(it | {"result": "error", "error": str(exc)})
             continue
-        ok = ctx.db.transition(mid, "reset", stage, str(RESET_TO), "ok", started, details={
-            "reason": REASON, "detected_lang": it.get("detected_lang"),
-            "used_stream": it.get("used"), "new_stream": it.get("chosen"),
-            "moved": moved})
-        if not ok:  # stage changed under us: put the transcript back, touch nothing
-            for m in moved:
-                if not Path(m["from"]).exists():
-                    os.rename(m["to"], m["from"])
+        if not ok:
             results.append(it | {"result": "skipped", "reason": "stage changed concurrently"})
             continue
         ctx.db.update_media_fields(mid, audio_path=None)

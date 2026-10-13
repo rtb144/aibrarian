@@ -238,6 +238,33 @@ def build_parser() -> argparse.ArgumentParser:
     trq.add_argument("--include-untagged", action="store_true",
                      help="also re-queue files with several audio tracks but no English tag")
     trq.add_argument("--json", action="store_true", help="print plan/results as JSON")
+    cy = sub.add_parser("consistency", help="catalog <-> filesystem consistency (check is "
+                        "read-only; fix only does safe relinks/repoints, dry run by default)")
+    cys = cy.add_subparsers(dest="cy_cmd", required=True)
+    cyc = cys.add_parser("check", help="classify unlinked transcripts, stale rows, missing "
+                         "paths, videos without rows, inode duplicates, stuck changes; writes "
+                         "REPORT_DIR/consistency.json")
+    cyc.add_argument("--json", action="store_true", help="print the full report as JSON")
+    cyc.add_argument("--fix-plan", action="store_true", help="also print the (dry-run) fix plan")
+    cyc.add_argument("--pending-minutes", type=int, default=30,
+                     help="flag change_log rows pending longer than this")
+    cyc.add_argument("--sample", type=int, default=5, help="example items per class")
+    cyc.add_argument("--no-write", action="store_true", help="do not write consistency.json")
+    cyf = cys.add_parser("fix", help="apply SAFE fixes only (relink transcript to the video in "
+                         "the same dir; repoint a stale row to its file); dry run unless "
+                         "--execute; every change goes to aib.change_log; never deletes")
+    cyf.add_argument("--execute", action="store_true")
+    cyf.add_argument("--only", action="append", choices=["stem_mismatch", "stale_row_path"],
+                     help="restrict to one class (repeatable)")
+    cyf.add_argument("--limit", type=int)
+    cyf.add_argument("--json", action="store_true")
+    ch = sub.add_parser("changes", help="aib.change_log (moves/renames/quarantines/repoints)")
+    ch.add_argument("--day", help="YYYY-MM-DD")
+    ch.add_argument("--pipeline", help="actor substring, e.g. prefect:book-autoapply or cli")
+    ch.add_argument("--op")
+    ch.add_argument("--path", help="substring of old/new path")
+    ch.add_argument("--status", choices=["pending", "committed", "failed", "rolled_back"])
+    ch.add_argument("--limit", type=int, default=50)
     return p
 
 
@@ -507,6 +534,36 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
             _print({"plan": plan, "result": res})
         else:
             print(requeue_lang.format_plan(plan, res), end="")
+    elif cmd == "consistency":
+        from . import consistency
+
+        if args.cy_cmd == "check":
+            rep = consistency.run(ctx, args.pending_minutes, write=not args.no_write)
+            if args.json:
+                _print(rep)
+            else:
+                print(consistency.format_summary(rep, plan=args.fix_plan, sample=args.sample),
+                      end="")
+        else:
+            rep = consistency.run(ctx, write=False)
+            res = consistency.execute_fixes(ctx, rep, args.execute,
+                                            args.only or consistency.SAFE_FIXES, args.limit,
+                                            say=None if args.json else print)
+            if args.json:
+                _print(res)
+            else:
+                print(f"{'done' if args.execute else 'dry run'}: {res['done']} changed, "
+                      f"{res['planned']} planned" + ("" if args.execute else
+                                                     " (use --execute)"))
+    elif cmd == "changes":
+        rows, total = ctx.db.changes(args.day, args.pipeline, args.op, args.path, args.status,
+                                     args.limit)
+        for r in reversed(rows):
+            print(f"{r['id']:>7} {r['ts']:%Y-%m-%d %H:%M:%S} {r['status']:<11} "
+                  f"{(r['actor'] or '-'):<26} {r['op']:<11} {r['entity']:<10} "
+                  f"{r['old_path'] or '-'} -> {r['new_path'] or '-'}"
+                  + (f"  ERROR {r['error']}" if r.get("error") else ""))
+        print(f"({len(rows)} of {total})")
     elif cmd == "openlibrary-lookup":
         from .openlibrary import lookup
 

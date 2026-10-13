@@ -24,6 +24,7 @@ from . import services
 from .actions import Context, RetryableError, run_action
 from .config import get_settings
 from .dashboard import (
+    CHANGES_UI_HTML,
     DASHBOARD_HTML,
     DEDUP_UI_HTML,
     DUPLICATES_UI_HTML,
@@ -32,7 +33,12 @@ from .dashboard import (
     SEARCH_UI_HTML,
     TRANSCRIPT_LANG_UI_HTML,
 )
-from .metrics import SUGGESTIONS_OPEN, refresh_stage_gauges
+from .metrics import (
+    SUGGESTIONS_OPEN,
+    refresh_consistency_gauges,
+    refresh_pending_gauge,
+    refresh_stage_gauges,
+)
 from .status import ACTIONS, Stage
 from .titles import TitleNotResolved
 
@@ -117,6 +123,13 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
                 SUGGESTIONS_OPEN.labels(d).set(len(c().db.list_suggestions(d)))
         except Exception:
             log.exception("metrics refresh failed")
+        try:
+            from .consistency import load_report
+
+            refresh_consistency_gauges(load_report(c().settings.report_dir))
+            refresh_pending_gauge(c().db)
+        except Exception:
+            log.exception("consistency metrics refresh failed")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     # -- status / observability --------------------------------------------
@@ -451,6 +464,36 @@ def create_app(ctx: Context | None = None, migrate: bool = True) -> FastAPI:
     @app.get("/transcripts/lang/ui", response_class=HTMLResponse)
     def transcript_lang_ui() -> str:
         return TRANSCRIPT_LANG_UI_HTML
+
+    # -- change log + consistency (read-only) ------------------------------
+    @app.get("/changes")
+    def changes(day: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+                pipeline: str | None = None, op: str | None = None, path: str | None = None,
+                status: str | None = Query(None,
+                                           pattern="^(pending|committed|failed|rolled_back)$"),
+                limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)):
+        """aib.change_log page, newest first; filters: day, pipeline (actor substring),
+        op, path (substring of old/new path), status."""
+        rows, total = c().db.changes(day or None, pipeline or None, op or None, path or None,
+                                     status or None, limit, offset)
+        return {"total": total, "limit": limit, "offset": offset, "changes": rows}
+
+    @app.get("/changes/ui", response_class=HTMLResponse)
+    def changes_ui() -> str:
+        return CHANGES_UI_HTML
+
+    @app.get("/consistency")
+    def consistency_report(full: bool = False):
+        """Latest REPORT_DIR/consistency.json (counts + fix plan; ``full`` adds items)."""
+        from .consistency import load_report
+
+        rep = load_report(c().settings.report_dir)
+        if rep is None:
+            raise HTTPException(404, "no consistency report yet (run the consistency flow)")
+        if not full:
+            rep = {k: v for k, v in rep.items() if k != "issues"} | {
+                "samples": {k: v[:5] for k, v in rep.get("issues", {}).items() if v}}
+        return rep
 
     # -- open library ------------------------------------------------------
     @app.get("/openlibrary/lookup")

@@ -46,11 +46,48 @@ ACTION_SECONDS = _get_or_create(Histogram,
 # dashboards see duplicate/zero series from every worker.
 if _MP_DIR:
     MEDIA_STAGE = BACKLOG = SUGGESTIONS_OPEN = None
+    CONSISTENCY_ISSUES = CONSISTENCY_LAST_RUN = CHANGES_PENDING = None
 else:
     MEDIA_STAGE = _get_or_create(Gauge, "aib_media_items", "Media items per pipeline stage", ["stage"])
     BACKLOG = _get_or_create(Gauge, "aib_backlog_items",
                              "Items not yet cataloged (excl. failed/skipped/review)")
     SUGGESTIONS_OPEN = _get_or_create(Gauge, "aib_suggestions_open", "Open librarian suggestions", ["domain"])
+    # from REPORT_DIR/consistency.json (written by the `consistency` flow) at scrape time
+    CONSISTENCY_ISSUES = _get_or_create(Gauge, "aib_consistency_issues",
+                                        "Consistency check: items per issue class", ["issue"])
+    CONSISTENCY_LAST_RUN = _get_or_create(Gauge, "aib_consistency_last_run_timestamp_seconds",
+                                          "Unix time of the last consistency report")
+    CHANGES_PENDING = _get_or_create(Gauge, "aib_change_log_pending",
+                                     "aib.change_log rows still pending (live, from the DB)",
+                                     ["age"])
+
+
+def refresh_consistency_gauges(report: dict | None) -> None:
+    """Idempotent: every known class is (re)set, absent ones to 0."""
+    if CONSISTENCY_ISSUES is None or not report:
+        return
+    from datetime import datetime
+
+    from .consistency import ALL_CLASSES
+
+    counts = report.get("counts") or {}
+    for k in ALL_CLASSES:
+        CONSISTENCY_ISSUES.labels(issue=k).set(counts.get(k, 0))
+    for k, v in (report.get("no_media_breakdown") or {}).items():
+        CONSISTENCY_ISSUES.labels(issue=f"no_media:{k}").set(v)
+    with contextlib.suppress(KeyError, ValueError):
+        CONSISTENCY_LAST_RUN.set(datetime.fromisoformat(report["generated_at"]).timestamp())
+
+
+def refresh_pending_gauge(db, stale_minutes: int = 30) -> None:
+    if CHANGES_PENDING is None:
+        return
+    with db.conn() as c:
+        r = c.execute("SELECT count(*) AS n, count(*) FILTER (WHERE ts < now() - "
+                      "make_interval(mins => %s)) AS stale FROM aib.change_log "
+                      "WHERE status='pending'", (stale_minutes,)).fetchone()
+    CHANGES_PENDING.labels(age="all").set(r["n"])
+    CHANGES_PENDING.labels(age="stale").set(r["stale"])
 
 
 def reset_multiprocess_dir() -> None:

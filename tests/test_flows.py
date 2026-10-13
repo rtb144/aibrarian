@@ -11,10 +11,11 @@ def test_scheduled_deployments_cannot_overlap():
                          "retry-failed", "openlibrary-import", "reprobe", "duplicates",
                          "dedup-quarantine", "quarantine-purge", "book-autoapply",
                          "calibre-validate", "openlibrary-index",
-                         "calibre-adopt-orphans", "transcript-langcheck"}
+                         "calibre-adopt-orphans", "transcript-langcheck", "consistency"}
     for name in ("media-pipeline", "discover", "library-scan", "book-scan",
                  "dedup-quarantine", "quarantine-purge", "book-autoapply",
-                 "calibre-validate", "openlibrary-index", "transcript-langcheck"):
+                 "calibre-validate", "openlibrary-index", "transcript-langcheck",
+                 "consistency"):
         cl = deps[name].concurrency_limit
         limit = getattr(cl, "limit", cl)
         strategy = (getattr(cl, "collision_strategy", None)

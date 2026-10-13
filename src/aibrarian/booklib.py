@@ -36,6 +36,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from aibrarian import changelog
 from aibrarian import quarantine as qmod
 from aibrarian.bookmeta import evaluate
 from aibrarian.calibre import Calibre
@@ -304,6 +305,25 @@ def _copy_verify(src: Path, dst: Path) -> None:
     os.rename(tmp, dst)
 
 
+def _logged_move_audio(it, s, db, logger, say) -> str:
+    """``_move_audio`` inside an aib.change_log entry + per-path advisory lock; catalog
+    paths (file_hash, open suggestions, any media row) follow in the commit transaction."""
+    try:
+        with changelog.change(db, "move", "book", old_path=it["old_path"],
+                              new_path=it["new_path"], source=getattr(logger, "source", None),
+                              check_lease=False,
+                              details={"suggestion_id": it.get("suggestion_id")}) as ch:
+            res = _move_audio(it, s, db, logger, say)
+            if res in ("move", "rename"):
+                ch.repoint(it["old_path"], it["new_path"])
+            elif res != "copy":  # copy: source quarantined separately; nothing to repoint
+                ch.fail(res)
+            return res
+    except changelog.Busy as exc:
+        say(f"SKIP {it['old_path']}: {exc}")
+        return "skip"
+
+
 def _move_audio(it, s, db, logger, say) -> str:
     src, dst = Path(it["old_path"]), Path(it["new_path"])
     batch = _batch(s)
@@ -425,7 +445,7 @@ def autoapply(sugs: list[dict[str, Any]], s, db=None, execute: bool = False,
                 if d in ("calibre_add", "add_format"):
                     it["result"] = _calibre_write(it, s, db, logger, cal, say)
                 elif d == "move":
-                    it["result"] = _move_audio(it, s, db, logger, say)
+                    it["result"] = _logged_move_audio(it, s, db, logger, say)
                 elif d == "quarantine":
                     q = _quarantine_source(it, Path(it["new_path"]), s, db, logger, it["reason"])
                     ok = q["result"] == "moved"

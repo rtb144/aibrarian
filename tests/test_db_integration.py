@@ -23,9 +23,9 @@ def db():
     with d.conn() as c:
         c.execute("DROP SCHEMA IF EXISTS aib CASCADE")
         c.commit()
-    assert d.migrate() == ["001_init", "002_media_info", "003_suggestion_noop", "004_file_hash",
-                           "005_purged", "006_dedup_action", "007_library_action",
-                           "008_calibre_actions"]
+    from aibrarian.db import list_migrations
+
+    assert d.migrate() == [v for v, _ in list_migrations()]
     assert d.migrate() == []  # idempotent
     return d
 
@@ -235,3 +235,79 @@ def test_library_action_log_and_statuses(db):
     for act in ("calibre_add", "add_format", "copy", "validate"):
         db.record_library_action({"action": act, "details": {"calibre": {"exit_code": 0}}})
     assert db.library_actions(action="validate")[0][0]["details"]["calibre"]["exit_code"] == 0
+
+
+def test_change_log_cascade_locks_and_claim(db, tmp_path):
+    from aibrarian import changelog
+
+    old, new = "/m/01-movies/dl/Alien.mkv", "/m/01-movies/Alien (1979)/Alien (1979).mkv"
+    mid = db.upsert_media([mf(old)])[0]["id"]
+    db.save_langcheck([{"path": "/m/01-movies/dl/Alien.transcript.json", "media_id": mid,
+                        "flags": [], "source": "sidecar"}])
+    db.put_file_hash(old, 1, 1.0, "s", None)
+    db.save_suggestion(Suggestion(domain="video", source_path=old, target_path="/x/y.mkv",
+                                  confidence=0.5, decision="suggest"))
+    with changelog.change(db, "move", "media_file", old_path=old, new_path=new,
+                          entity_id=mid, actor="test") as ch:
+        with db.path_locks([old]) as got:  # held by the change -> busy for others
+            assert got is False
+        ch.repoint(old, new)
+    assert ch.status == "committed" and ch.entity_id == mid
+    assert db.get_media(mid)["path"] == new
+    with db.conn() as c:
+        assert c.execute("SELECT path FROM aib.transcript_lang").fetchone()["path"] == \
+            "/m/01-movies/Alien (1979)/Alien (1979).transcript.json"
+        assert c.execute("SELECT path FROM aib.file_hash").fetchone()["path"] == new
+        assert c.execute("SELECT source_path FROM aib.suggestion").fetchone()["source_path"] == new
+    rows, total = db.changes(op="move", path="Alien (1979)")
+    assert total == 1 and rows[0]["status"] == "committed" and rows[0]["actor"] == "test"
+
+    # update_path cascades back, and the per-path lock blocks a stage claim
+    assert db.update_path(new, old) == mid
+    with db.conn() as c:
+        c.execute("UPDATE aib.media_file SET stage='probed' WHERE id=%s", (mid,))
+        c.commit()
+    with db.path_locks([old], [mid]) as got:
+        assert got
+        assert db.claim("probed", None, 10, "w1") == []
+        with pytest.raises(changelog.Busy), changelog.change(
+                db, "move", "media_file", old_path=old, new_path=new, entity_id=mid):
+            pass
+    assert [r["id"] for r in db.claim("probed", None, 10, "w1")] == [mid]
+    # fresh lease -> moves refuse
+    with pytest.raises(changelog.Busy), changelog.change(
+            db, "move", "media_file", old_path=old, new_path=new, entity_id=mid):
+        pass
+
+    # failure inside -> failed; stale pending detection
+    with pytest.raises(RuntimeError), changelog.change(db, "rename", "file", old_path="/a",
+                                                       new_path="/b", check_lease=False):
+        raise RuntimeError("boom")
+    assert db.changes(status="failed")[0][0]["error"] == "boom"
+    cid = db.change_begin({"txn_id": "t", "op": "move", "entity": "file", "old_path": "/p"})
+    with db.conn() as c:
+        c.execute("UPDATE aib.change_log SET ts = now() - interval '2 hours' WHERE id=%s",
+                  (cid,))
+        c.commit()
+    assert [r["id"] for r in db.stale_pending_changes(30)] == [cid]
+    snap = db.consistency_snapshot()
+    assert snap["media"][0]["id"] == mid and snap["changes"]
+
+
+def test_quarantine_media_cascades_and_commits_change(db):
+    mid = db.upsert_media([mf("/m/01-movies/a.mkv")])[0]["id"]
+    db.save_langcheck([{"path": "/m/01-movies/a.transcript.json", "media_id": mid,
+                        "flags": [], "source": "sidecar"}])
+    cid = db.change_begin({"txn_id": "t", "op": "quarantine", "entity": "media_file"})
+    db.quarantine_media(mid, "/m/01-movies/a.mkv", "/q/a.mkv", datetime.now(UTC),
+                        {"keeper": "/k.mkv"}, change_id=cid)
+    assert db.changes(status="committed")[0][0]["id"] == cid
+    with db.conn() as c:
+        assert c.execute("SELECT path FROM aib.transcript_lang").fetchone()["path"] == \
+            "/q/a.transcript.json"
+    db.restore_media(mid, "/q/a.mkv", "/m/01-movies/a.mkv", "cataloged", datetime.now(UTC))
+    m = db.get_media(mid)
+    assert m["path"] == "/m/01-movies/a.mkv" and not m["missing"]
+    with db.conn() as c:
+        assert c.execute("SELECT path FROM aib.transcript_lang").fetchone()["path"] == \
+            "/m/01-movies/a.transcript.json"

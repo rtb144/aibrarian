@@ -32,6 +32,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from aibrarian import changelog
 from aibrarian import quarantine as qmod
 from aibrarian.booklib import ActionLog, make_calibre
 from aibrarian.calibre import Calibre
@@ -149,6 +150,24 @@ def _calibre_file(cal: Calibre, bid: int, fmt: str) -> str | None:
     return next((f["path"] for f in (book or {}).get("formats", []) if f["format"] == fmt), None)
 
 
+def _logged_quarantine(logger: ActionLog, src: Path, keeper: str | None, lib: Path,
+                       batch: Path, sides: list[Path]) -> dict[str, Any]:
+    """``_quarantine`` wrapped in an aib.change_log entry + per-path advisory lock."""
+    try:
+        with changelog.change(logger.db, "quarantine", "book", old_path=src,
+                              new_path=batch / src.relative_to(lib), source=logger.source,
+                              check_lease=False, details={"keeper": keeper,
+                                                          "reason": "calibre_adopt"}) as ch:
+            q = _quarantine(src, keeper, lib, batch, sides)
+            if q["result"] != "moved":
+                ch.fail(q.get("reason") or q["result"])
+            else:
+                ch.sidecars([(m["from"], m["to"]) for m in q.get("sidecars_moved", [])])
+            return q
+    except changelog.Busy as exc:
+        return {"result": "skipped", "reason": f"busy: {exc}"}
+
+
 def _run_group(p: dict[str, Any], cal: Calibre, batch: Path, logger: ActionLog,
                say: Callable[[str], None]) -> dict[str, int]:
     lib = cal.library
@@ -210,8 +229,8 @@ def _run_group(p: dict[str, Any], cal: Calibre, batch: Path, logger: ActionLog,
         if last and folder.is_dir():
             sides = [x for x in sorted(folder.iterdir()) if x.is_file() and x != src
                      and x.suffix.lower() not in BOOK_EXTENSIONS]
-        q = _quarantine(src, d["keeper"], lib, batch, sides) if src.is_file() else \
-            {"result": "skipped", "reason": "source vanished"}
+        q = _logged_quarantine(logger, src, d["keeper"], lib, batch, sides) \
+            if src.is_file() else {"result": "skipped", "reason": "source vanished"}
         sq = {x: q.get(x) for x in ("result", "reason", "manifest", "quarantine_path")}
         if d["action"] == "quarantine":
             if q["result"] == "moved":

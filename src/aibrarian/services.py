@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from . import books, clips, fileops, titles
+from . import books, changelog, clips, fileops, titles
 from .actions import Context
 from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .eta import estimate
@@ -130,10 +130,40 @@ def apply_suggestion(ctx: Context, sid: int, apply: bool = False) -> dict[str, A
         ctx.db.record_file_op(r.op, r.src, r.dst, r.result, r.error, sid)
 
     started = datetime.now(UTC)
-    ops = fileops.move_with_sidecars(
-        src, dst, apply=apply, allowed_roots=_allowed_roots(ctx),
-        audit=fileops.chain_audit(audit, fileops.jsonl_audit(audit_dir / "file_ops.jsonl")),
-        cleanup_stop=next((r for r in _allowed_roots(ctx) if src.is_relative_to(r)), None))
+
+    def run_move() -> list[fileops.OpResult]:
+        return fileops.move_with_sidecars(
+            src, dst, apply=apply, allowed_roots=_allowed_roots(ctx),
+            audit=fileops.chain_audit(audit, fileops.jsonl_audit(audit_dir / "file_ops.jsonl")),
+            cleanup_stop=next((r for r in _allowed_roots(ctx) if src.is_relative_to(r)), None))
+
+    applied_media_id: int | None = None
+    if not apply:
+        ops = run_move()
+    else:
+        # change_log + advisory locks: pending row before the move, media row and its
+        # dependent paths repointed in the same transaction that marks it committed.
+        media = ctx.db.get_media_by_path(str(src)) if hasattr(ctx.db, "get_media_by_path") \
+            else None
+        op_name = "rename" if src.parent == dst.parent else "move"
+        try:
+            with changelog.change(ctx.db, op_name, "media_file" if media else (
+                    "book" if sug["domain"] == "book" else "file"),
+                                  old_path=src, new_path=dst,
+                                  entity_id=media["id"] if media else None,
+                                  details={"suggestion_id": sid}) as ch:
+                ops = run_move()
+                if ops and ops[0].result == "ok":
+                    moved = [o for o in ops if o.result == "ok"]
+                    ch.add_undo(lambda: [Path(o.dst).rename(o.src) for o in reversed(moved)
+                                         if Path(o.dst).exists() and not Path(o.src).exists()])
+                    ch.repoint(src, dst)
+                    ch.sidecars([(o.src, o.dst) for o in moved[1:]])
+                else:
+                    ch.fail(ops[0].result if ops else "error")
+            applied_media_id = ch.entity_id
+        except changelog.Busy as exc:
+            return base | {"status": "busy", "error": str(exc), "ops": []}
     main = ops[0] if ops else None
     result = main.result if main else "error"
     status = "planned" if not apply else {"ok": "applied", "skip_dst_exists": "refused_dst_exists",
@@ -171,7 +201,7 @@ def apply_suggestion(ctx: Context, sid: int, apply: bool = False) -> dict[str, A
         return out
     if status == "applied":
         ctx.db.set_suggestion_status(sid, "applied")
-        media_id = ctx.db.update_path(str(src), str(dst))
+        media_id = applied_media_id  # repointed (with cascade) inside the change above
         out["media_id"] = media_id
         if media_id is not None:
             ctx.db.record_event(media_id, "apply_suggestion", ctx.db.get_media(media_id)["stage"],

@@ -223,6 +223,23 @@ def transcript_langcheck_flow(limit: int | None = None) -> dict:
                          reporter=ProgressReporter("transcript-langcheck"))["summary"]
 
 
+@flow(name="consistency", log_prints=True)
+def consistency_flow(pending_minutes: int = 30) -> dict:
+    """Read-only catalog <-> filesystem check (see aibrarian.consistency). Writes
+    REPORT_DIR/consistency.json (the API turns it into aib_consistency_issues gauges) and
+    flags change_log rows pending > ``pending_minutes``. Never fixes anything."""
+    from aibrarian import consistency
+
+    rep = consistency.run(ctx(), pending_minutes,
+                          reporter=ProgressReporter("consistency", done_key="transcripts"))
+    if rep["counts"].get("pending_stale"):
+        log.warning("change_log has %d pending changes older than %d min (crashed or "
+                    "half-done move?)", rep["counts"]["pending_stale"], pending_minutes)
+    return {"counts": {k: v for k, v in rep["counts"].items() if v},
+            "no_media_breakdown": rep["no_media_breakdown"],
+            "report": rep.get("report_path")}
+
+
 @flow(name="retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
@@ -258,6 +275,7 @@ def openlibrary_index_flow(rebuild: bool = False) -> dict:
 # still-running one is cancelled instead of piling up.
 OL_INDEX_CRON = "15 1 * * 6"  # weekly, Saturday 01:15 UTC; skips when the Delta is unchanged
 LANGCHECK_CRON = "20 2 * * *"  # nightly 02:20; read-only, cheap (CPU, no GPU)
+CONSISTENCY_INTERVAL_S = 30 * 60  # read-only walk of the transcribe roots + a few queries
 SINGLE_RUN = ConcurrencyLimitConfig(limit=1, collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW)
 
 
@@ -280,6 +298,8 @@ def deployments(group: str) -> list:
            quarantine_purge_flow.to_deployment("quarantine-purge", cron=PURGE_CRON, **one),
            transcript_langcheck_flow.to_deployment("transcript-langcheck",
                                                    cron=LANGCHECK_CRON, **one),
+           consistency_flow.to_deployment("consistency", interval=CONSISTENCY_INTERVAL_S,
+                                          **one),
            openlibrary_import_flow.to_deployment("openlibrary-import", **one),
            calibre_adopt_orphans_flow.to_deployment("calibre-adopt-orphans", **one),
            openlibrary_index_flow.to_deployment("openlibrary-index", cron=OL_INDEX_CRON, **one)]
