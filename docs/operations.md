@@ -548,3 +548,17 @@ by the API (`job="aibrarian-api"`); worker endpoints `:9108`/`:9109` expose only
 `aib_action_total` / `aib_action_duration_seconds`, aggregated across Prefect flow-run subprocesses
 via prometheus_client multiprocess mode (`PROMETHEUS_MULTIPROC_DIR=/tmp/aib-prom-multiproc` in the
 worker containers, wiped at worker start). Don't set that variable on the API.
+
+### book-scan robustness
+
+- One run at a time: deployment concurrency 1 / CANCEL_NEW **and** a Postgres advisory lock
+  (key 724413). A second run logs `book-scan already running elsewhere (advisory lock held); exiting`
+  and finishes in seconds, so the hourly schedule is a no-op while a scan is still going.
+- Per-file limits: metadata extraction (pypdf/epub/audio tags) runs in a killable subprocess,
+  `AIB_BOOK_EXTRACT_TIMEOUT_S` (default 120); the whole file (lookups, Ollama) is capped by
+  `AIB_BOOK_FILE_TIMEOUT_S` (default 600). A timeout/crash is stored as a suggestion with
+  status `error` (WARNING names the file) and is skipped by resume. Files slower than
+  `AIB_BOOK_SLOW_FILE_S` (60) get a WARNING. Progress lines are also emitted while waiting on extraction.
+- Resume skips every book suggestion's source path (any status, incl. failed/error), targets of
+  applied suggestions, and anything under `CALIBRE_DIR`. The start line shows the breakdown:
+  `book-scan start: total=N (progress every 900s) files_found=F skipped=S (video=.. suggested=.. applied=.. in_calibre=..) ...`

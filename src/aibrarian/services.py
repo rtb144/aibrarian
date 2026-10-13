@@ -4,6 +4,7 @@ library/book scans, applying suggestions, transcript search and clipping."""
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -62,35 +63,103 @@ def library_scan(ctx: Context, max_items: int | None = None, resume: bool = True
     return {"run_id": run_id, **counts}
 
 
+BOOK_SCAN_LOCK = 724413  # pg advisory lock: one book-scan at a time, cluster-wide
+
+
 def book_scan(ctx: Context, paths: list[Path] | None = None, resume: bool = True,
               max_items: int | None = None, flow_run_id: str | None = None,
               reporter=None) -> dict[str, Any]:
-    """``reporter``: optional ProgressReporter, ticked once per file."""
+    """``reporter``: optional ProgressReporter, ticked per file and while a file runs.
+
+    Guarded by a Postgres advisory lock: a second concurrent run logs and returns
+    ``{"locked": 1}`` immediately. Per file: metadata extraction runs in a killable
+    subprocess (AIB_BOOK_EXTRACT_TIMEOUT_S, default 120) and the whole file is capped
+    by AIB_BOOK_FILE_TIMEOUT_S (default 600, covers HTTP/LLM); a timeout or crash is
+    saved as a suggestion with status 'error' so resume skips it next time."""
+    from .progress import run_logger
+
+    with ctx.db.try_lock(BOOK_SCAN_LOCK) as got:
+        if not got:
+            msg = "book-scan already running elsewhere (advisory lock held); exiting"
+            (reporter.logger if reporter and reporter.logger else run_logger()).info(msg)
+            return {"locked": 1, "processed": 0}
+        return _book_scan(ctx, paths, resume, max_items, flow_run_id, reporter)
+
+
+def _book_scan(ctx, paths, resume, max_items, flow_run_id, reporter) -> dict[str, Any]:
+    import time
+
+    from .db import scan_key
+    from .progress import run_logger
+    from .timeouts import ItemTimeout, alarm, env_seconds, run_in_subprocess
+
     s = ctx.settings
+    lg = (reporter.logger if reporter and reporter.logger else None) or run_logger()
+    debug, warn = getattr(lg, "debug", log.debug), getattr(lg, "warning", log.warning)
+    extract_t = env_seconds("AIB_BOOK_EXTRACT_TIMEOUT_S", 120)
+    file_t = env_seconds("AIB_BOOK_FILE_TIMEOUT_S", 600)
+    slow_t = env_seconds("AIB_BOOK_SLOW_FILE_S", 60)
     dirs = paths or s.book_source_dirs
     run_id = ctx.db.start_run("book", {"dirs": [str(d) for d in dirs]}, flow_run_id)
-    done = ctx.db.suggestion_sources("book") if resume else set()
+    keys = ctx.db.book_scan_skip_keys() if resume else {"suggested": set(), "applied": set()}
+    calibre = getattr(s, "calibre_dir", None)
+    calibre_key = scan_key(calibre) + os.sep if calibre else None
     from .olindex import make_ref_lookup
 
     ref = make_ref_lookup(s)
     ol = (lambda t, a, i: ref(t, a, [i] if i else [])) if ref else make_ol_lookup(ctx.db)
-    counts = {"processed": 0, "auto_applied": 0, "skipped_resume": 0}
     files = list(books.iter_book_files(dirs))
-    if reporter:
-        todo = sum(1 for p in files
-                   if p.suffix.lower() not in VIDEO_EXTENSIONS and str(p) not in done)
-        reporter.total = min(todo, max_items) if max_items else todo
-        reporter.start(f"files_found={len(files)}")
+    skip = {"video": 0, "suggested": 0, "applied": 0, "in_calibre": 0}
+    todo: list[Path] = []
     for p in files:
-        if max_items and counts["processed"] >= max_items:
-            break
-        if p.suffix.lower() in VIDEO_EXTENSIONS or str(p) in done:
-            counts["skipped_resume"] += 1
-            continue
+        k = scan_key(p)
+        if p.suffix.lower() in VIDEO_EXTENSIONS:
+            skip["video"] += 1
+        elif k in keys["suggested"]:
+            skip["suggested"] += 1
+        elif k in keys["applied"]:
+            skip["applied"] += 1
+        elif resume and calibre_key and k.startswith(calibre_key):
+            skip["in_calibre"] += 1
+        else:
+            todo.append(p)
+    if max_items:
+        todo = todo[:max_items]
+    skipped = sum(skip.values())
+    counts = {"processed": 0, "auto_applied": 0, "errors": 0, "skipped_resume": skipped}
+    detail = (f"files_found={len(files)} skipped={skipped} ("
+              + " ".join(f"{k}={v}" for k, v in skip.items())
+              + f") known_suggestions={len(keys['suggested'])}"
+              + f" extract_timeout={extract_t:.0f}s file_timeout={file_t:.0f}s")
+    if reporter:
+        reporter.total = len(todo)
+        reporter.start(detail)
+    else:
+        lg.info(f"book-scan start: total={len(todo)} {detail}")
+
+    def extract(path: Path) -> dict[str, Any]:
+        on_wait = (lambda el: reporter.tick(**counts)) if reporter else None
+        return run_in_subprocess(books.extract_metadata, (path,), extract_t, on_wait=on_wait)
+
+    for p in todo:
         if reporter:
             reporter.tick(current=p.name, **counts)
-        sug = books.catalog_file(p, s, ctx.ollama, ol_lookup=ol, run_id=run_id,
-                                  ref_lookup=ref)
+        debug(f"book-scan file start: {p}")
+        t0 = time.monotonic()
+        try:
+            with alarm(file_t):
+                sug = books.catalog_file(p, s, ctx.ollama, ol_lookup=ol, run_id=run_id,
+                                         ref_lookup=ref, extract=extract)
+        except (ItemTimeout, RuntimeError) as exc:
+            el = time.monotonic() - t0
+            warn(f"book-scan error on {p} after {el:.0f}s: {exc}; "
+                       "recorded as status=error, continuing")
+            ctx.db.save_scan_error("book", str(p), str(exc), run_id)
+            counts["errors"] += 1
+            continue
+        el = time.monotonic() - t0
+        if el > slow_t:
+            warn(f"book-scan slow file ({el:.0f}s > {slow_t:.0f}s): {p}")
         sid = ctx.db.save_suggestion(sug)
         counts["processed"] += 1
         if sug.decision == "auto":

@@ -200,8 +200,8 @@ def decide(conf: float, s: Settings) -> Decision:
 
 def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
                  ol_lookup=None, gb_lookup=google_books, run_id: int | None = None,
-                 ref_lookup=None) -> Suggestion:
-    meta = extract_metadata(path)
+                 ref_lookup=None, extract=None) -> Suggestion:
+    meta = (extract or extract_metadata)(path)
     ref = None
     if ol_lookup is not None:
         ref = ol_lookup(meta.get("title"), meta.get("author"), meta.get("isbn"))

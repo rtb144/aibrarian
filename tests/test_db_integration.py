@@ -311,3 +311,22 @@ def test_quarantine_media_cascades_and_commits_change(db):
     with db.conn() as c:
         assert c.execute("SELECT path FROM aib.transcript_lang").fetchone()["path"] == \
             "/m/01-movies/a.transcript.json"
+
+
+def test_book_scan_skip_keys_and_error_status(db):
+    from aibrarian.models import Suggestion
+
+    a = db.save_suggestion(Suggestion(domain="book", source_path="/m/drop/a.epub",
+                                      target_path="/books/A/a.epub", confidence=0.9,
+                                      decision="suggest"))
+    db.save_suggestion(Suggestion(domain="book", source_path="/m/drop/b.epub",
+                                  target_path="/books/B/b.epub", confidence=0.9,
+                                  decision="suggest"))
+    db.set_suggestion_status(a, "applied")
+    db.save_scan_error("book", "/m/drop/bad.pdf", "timed out after 120s", None)
+    db.save_scan_error("book", "/m/drop/bad.pdf", "timed out after 120s", None)  # upsert
+    k = db.book_scan_skip_keys()
+    assert {"/m/drop/a.epub", "/m/drop/b.epub", "/m/drop/bad.pdf"} <= k["suggested"]
+    assert k["applied"] == {"/books/A/a.epub"}
+    with db.try_lock(724413) as g1, db.try_lock(724413) as g2:
+        assert g1 and not g2

@@ -59,6 +59,15 @@ def test_falls_back_outside_prefect():
     assert isinstance(run_logger(), logging.Logger)
 
 
+def _lock(got):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _l(key):
+        yield got
+    return _l
+
+
 def test_book_scan_ticks(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -70,8 +79,11 @@ def test_book_scan_ticks(monkeypatch, tmp_path):
                         lambda p, *a, **k: SimpleNamespace(decision="review"))
     monkeypatch.setattr("aibrarian.olindex.make_ref_lookup", lambda s: None)
     monkeypatch.setattr(services, "make_ol_lookup", lambda db: None)
-    db = SimpleNamespace(start_run=lambda *a: "r1", suggestion_sources=lambda k: {str(files[0])},
-                         save_suggestion=lambda s: 1, finish_run=lambda *a: None)
+    db = SimpleNamespace(start_run=lambda *a: "r1",
+                         book_scan_skip_keys=lambda: {"suggested": {str(files[0])},
+                                                      "applied": set()},
+                         save_suggestion=lambda s: 1, finish_run=lambda *a: None,
+                         try_lock=_lock(True))
     ctx = SimpleNamespace(settings=SimpleNamespace(book_source_dirs=[tmp_path]), db=db,
                           ollama=None)
     cap = Cap()

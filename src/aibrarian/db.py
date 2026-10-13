@@ -8,6 +8,7 @@ tracked in ``aib.schema_migrations``. They run automatically on service start
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from importlib import resources
@@ -100,6 +101,12 @@ def list_migrations() -> list[tuple[str, str]]:
 
 def is_noop(source: str | None, target: str | None, op: str | None) -> bool:
     return op == "none" or not target or str(target) == str(source)
+
+
+def scan_key(path) -> str:
+    """Stable resume key: absolute, normalised path string (no symlink resolution,
+    so it is cheap and identical for the same file however it was spelled)."""
+    return os.path.normpath(os.path.abspath(os.fspath(path)))
 
 
 class Database:
@@ -873,6 +880,35 @@ class Database:
             rows = c.execute("SELECT source_path FROM aib.suggestion WHERE domain=%s "
                              "AND status = ANY(%s)", (domain, statuses)).fetchall()
         return {r["source_path"] for r in rows}
+
+    def book_scan_skip_keys(self) -> dict[str, set[str]]:
+        """Resume keys for book-scan: every book suggestion's source path (ANY status,
+        including failed/error) plus the target path of applied ones (the file now lives
+        there, e.g. adopted into Calibre). Keys are normalised with ``scan_key``."""
+        with self.conn() as c:
+            rows = c.execute("SELECT source_path, target_path, status FROM aib.suggestion "
+                             "WHERE domain='book'").fetchall()
+        src = {scan_key(r["source_path"]) for r in rows if r["source_path"]}
+        dst = {scan_key(r["target_path"]) for r in rows
+               if r["target_path"] and r["status"] == "applied"}
+        return {"suggested": src, "applied": dst}
+
+    def save_scan_error(self, domain: str, source_path: str, error: str,
+                        run_id: int | None = None) -> int:
+        """Record a file that could not be catalogued (timeout/crash) as status 'error'."""
+        with self.conn() as c:
+            row = c.execute(
+                """INSERT INTO aib.suggestion (domain, source_path, target_path, metadata,
+                       confidence, decision, rationale, media_kind, op, run_id, status)
+                   VALUES (%s,%s,NULL,%s,0,'reject',%s,NULL,'none',%s,'error')
+                   ON CONFLICT (domain, source_path) DO UPDATE SET status='error',
+                     rationale=EXCLUDED.rationale, metadata=EXCLUDED.metadata,
+                     run_id=EXCLUDED.run_id, created_at=now()
+                   RETURNING id""",
+                (domain, source_path, _dumps({"error": error}), error[:500], run_id),
+            ).fetchone()
+            c.commit()
+            return row["id"]
 
     def start_run(self, domain: str, params: dict[str, Any],
                   flow_run_id: str | None = None) -> int:
