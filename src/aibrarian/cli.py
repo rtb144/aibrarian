@@ -131,9 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     br = bks.add_parser("rescan", help="re-catalog error / low-confidence book suggestions in "
                         "place (dry run unless --execute; holds the book-scan lock)")
-    br.add_argument("--status", action="append", help="error | needs_review | review (open, "
-                    "decision review/reject) | open | failed ...; repeatable. Default: error, "
-                    "needs_review, review")
+    br.add_argument("--status", action="append", help="error | needs_review | review | reject "
+                    "(review/reject = open with that decision) | open | failed ...; repeatable. "
+                    "Default: error, needs_review, review, reject")
+    br.add_argument("--id", type=int, action="append", help="only these suggestion ids "
+                    "(repeatable; any non-applied status unless --status is given)")
     br.add_argument("--execute", action="store_true")
     br.add_argument("--limit", type=int)
     br.add_argument("--json", action="store_true")
@@ -224,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
     obi.add_argument("--rebuild", action="store_true", help="ignore an up-to-date/partial index")
     obi.add_argument("--batch-size", type=int, default=50_000)
     olxs.add_parser("stats", help="index row counts, last build, build progress")
+    olxs.add_parser("add-title-index", help="add the title-only (edition-insensitive) lookup "
+                    "table to an existing index (no rebuild; minutes)")
     olk = olxs.add_parser("lookup", help="query the index")
     olk.add_argument("--title")
     olk.add_argument("--author")
@@ -382,6 +386,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         if args.ol_cmd == "build-index":
             olindex.build_index(s.ol_delta_dir, s.ol_index_path, args.batch_size, args.rebuild,
                                 log=lambda m: print(m, file=sys.stderr, flush=True))
+        elif args.ol_cmd == "add-title-index":
+            _print(olindex.add_title_index(s.ol_index_path,
+                                           log=lambda m: print(m, file=sys.stderr, flush=True)))
         elif args.ol_cmd == "stats":
             _print(olindex.stats(s.ol_index_path) | {"delta_dir": str(s.ol_delta_dir)})
         else:
@@ -494,7 +501,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         if "applied" in (args.status or []):
             print("applied suggestions are never rescanned", file=sys.stderr)
             return 2
-        res = services.book_rescan(ctx, args.status, args.execute, args.limit, progress=_say)
+        res = services.book_rescan(ctx, args.status, args.execute, args.limit, progress=_say,
+                                   ids=args.id)
         if args.json:
             print(json.dumps(res, indent=2, default=str))
         elif res.get("locked"):

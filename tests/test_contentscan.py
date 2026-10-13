@@ -85,7 +85,7 @@ def test_broken_xref_pdf_pymupdf_metadata_and_content(tmp_path, caplog):
     assert "Silent Harbour" in meta["content_snippet"] and len(meta["content_snippet"]) <= 1500
     lk = books.lookup_fields(meta)
     assert lk == {"title": "The Silent Harbour", "author": "Margaret Ellison",
-                  "isbn": "9780306406157"}
+                  "isbn": "9780306406157", "title_source": "content"}
 
 
 def test_pypdf_fallback_when_pymupdf_raises(tmp_path, monkeypatch):
@@ -166,7 +166,7 @@ def test_rescan_dry_run_lists_and_changes_nothing():
     db = RescanDB()
     res = services.book_rescan(SimpleNamespace(db=db), limit=2)
     assert db.lock_key == services.BOOK_SCAN_LOCK == 724413
-    assert db.calls == [(["error", "needs_review"], True, 2)]
+    assert db.calls == [(["error", "needs_review"], ["review", "reject"], 2)]
     assert res["count"] == 2 and res["by_status"] == {"error": 1, "needs_review": 1}
     assert [s["id"] for s in res["sample"]] == [1, 2] and not db.updated and "results" not in res
 

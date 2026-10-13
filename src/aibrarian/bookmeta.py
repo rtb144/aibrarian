@@ -137,7 +137,8 @@ def score(embedded: dict[str, Any], ref: dict[str, Any] | None,
         s, why = 0.10, "no usable title (junk file name)"
     else:
         t = _ratio(title, ref.get("title")) if ref else 0.0
-        s, why = 0.35 + 0.20 * t, "title from file name / LLM only"
+        s, why = 0.35 + 0.30 * t, "title from file name / LLM only" + (
+            f" ({t:.0%} vs reference)" if ref else "")
     if not author or author.strip().lower() in ("unknown", "unknown author"):
         s, why = min(s, 0.30), why + "; no author"
     return round(s, 3), why
@@ -155,11 +156,16 @@ def evaluate(sug: dict[str, Any], ref_lookup=None) -> dict[str, Any]:
     ref = md.get("reference") or {}
     cls = md.get("classification") or {}
     src = Path(sug["source_path"])
-    raw_title = emb.get("title") if not is_junk_title(emb.get("title")) else None
+    from .contentscan import title_is_garbage
+
+    raw_title = emb.get("title")
+    if is_junk_title(raw_title) or title_is_garbage(raw_title, emb.get("filename")):
+        raw_title = None
     if ref_lookup is not None:
         from .olindex import isbn13, isbns_in_name, opf_isbns
 
         isbns = [i for i in [isbn13(emb.get("isbn"))] + opf_isbns(src) + isbns_in_name(src.name)
+                 + isbns_in_name(str(emb.get("title") or ""))
                  + [isbn13(x) for x in emb.get("content_isbns") or []] if i]
         q_title = clean_title(raw_title or cls.get("title"))["title"]
         try:

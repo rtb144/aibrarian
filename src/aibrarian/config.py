@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     jellyfin_api_key: str = Field(
         "", validation_alias=_env("jellyfin_api_key", "JELLYFIN_API_KEY"))
     google_books_api_key: str = ""  # optional; unauthenticated requests are rate-limited
+    # Google Books is off by default: the local Open Library index is the reference source
+    google_books_enabled: bool = Field(
+        False, validation_alias=_env("google_books_enabled", "GOOGLE_BOOKS_ENABLED"))
 
     # --- behaviour ---------------------------------------------------------
     transcribe_batch_size: int = Field(5, validation_alias=_env("transcribe_batch_size", "BATCH_SIZE"))

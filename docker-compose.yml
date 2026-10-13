@@ -11,6 +11,7 @@ x-aib-env: &aib-env
   AIB_JELLYFIN_URL: ${JELLYFIN_URL:-http://host.docker.internal:8096}
   AIB_JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
   AIB_GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
+  AIB_GOOGLE_BOOKS_ENABLED: ${AIB_GOOGLE_BOOKS_ENABLED:-false}
   AIB_MEDIA_ROOT: /media
   AIB_TRANSCRIBE_ROOTS: ${AIB_TRANSCRIBE_ROOTS:-01-movies,02-tvshows,05-instructional_videos}
   AIB_LIBRARY_ROOTS: ${AIB_LIBRARY_ROOTS:-01-movies,02-tvshows,03-music,downloads}

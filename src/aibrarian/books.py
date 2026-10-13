@@ -87,19 +87,55 @@ def quiet_pypdf() -> None:
         logging.getLogger(name).setLevel(logging.ERROR)
 
 
+
+def quiet_http() -> None:
+    """httpx logs each request URL at INFO, query string (API key) included: WARNING only,
+    plus a redacting filter in case someone turns it back up."""
+    from .logging_setup import RedactFilter
+
+    for name in ("httpx", "httpcore"):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.WARNING)
+        if not any(isinstance(f, RedactFilter) for f in lg.filters):
+            lg.addFilter(RedactFilter())
+
+
 quiet_pypdf()
+quiet_http()
+
+
+def mupdf():
+    """The PyMuPDF module (``import pymupdf``; ``fitz`` for old releases) with MuPDF's own
+    stderr messages switched off (warnings stay readable via TOOLS.mupdf_warnings())."""
+    try:
+        import pymupdf as m
+    except ImportError:
+        import fitz as m  # pymupdf < 1.24.3
+    try:
+        m.TOOLS.mupdf_display_errors(False)
+        m.TOOLS.mupdf_display_warnings(False)
+    except Exception:
+        pass
+    return m
+
+
+def _mupdf_warnings(m) -> str | None:
+    try:
+        w = m.TOOLS.mupdf_warnings(reset=True)
+    except Exception:
+        return None
+    return w[:300] if w else None
 
 
 def _pymupdf_metadata(path: Path) -> dict[str, Any]:
-    import fitz  # pymupdf: C xref repair, fast even on broken PDFs
-
-    with fitz.open(str(path)) as doc:
+    m = mupdf()  # C xref repair: fast even on broken PDFs
+    with m.open(str(path)) as doc:
         info = doc.metadata or {}
         pages = doc.page_count
     return clean_metadata({"title": info.get("title"), "author": info.get("author"),
                            "subject": info.get("subject"), "keywords": info.get("keywords"),
                            "pages": str(pages) if pages else None,
-                           "pdf_reader": "pymupdf"})
+                           "pdf_warnings": _mupdf_warnings(m), "pdf_reader": "pymupdf"})
 
 
 def _pypdf_metadata(path: Path) -> dict[str, Any]:
@@ -172,42 +208,113 @@ def extract_metadata(path: Path, content_scan: bool = True) -> dict[str, Any]:
     return {k: v for k, v in meta.items() if v not in (None, "")}
 
 
-def lookup_fields(meta: dict[str, Any]) -> dict[str, Any]:
-    """Title/author/isbn to look up: embedded values, with the content scan filling in a
-    missing ISBN and replacing a missing/garbage title or a missing author."""
+_NAME_PUBLISHER = re.compile(r"^(wiley|wrox( press)?|o ?reilly( media)?|apress|packt( publishing)?|"
+                             r"manning|addison[ -]wesley|prentice[ -]hall|mcgraw[ -]hill|"
+                             r"no starch( press)?|sams|sybex|microsoft press|"
+                             r"pragmatic (bookshelf|programmers))\b[ ._-]*", re.I)
+_NAME_TAIL = re.compile(r"[\s._-]*(\(?(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+                        r"[a-z]*[ ._-]*(19|20)\d\d\)?|\(?(19|20)\d\d\)?|retail|ebook|"
+                        r"\[[^\]]*\]|\((pdf|epub|ebook)\))\s*$", re.I)
+
+
+def filename_title(name: str) -> str | None:
+    """Readable title from a download-style file name ('Wiley.Data.Structures.and.
+    Algorithms.in.Java.5th.Edition.Mar.2010.pdf' -> 'Data Structures and Algorithms in Java
+    5th Edition'); None for junk names (ISBNs, digits, scan0001...)."""
     from .contentscan import title_is_garbage
 
-    title, author = meta.get("title"), meta.get("author")
-    if meta.get("content_title") and (not title or title_is_garbage(title, meta.get("filename"))):
-        title = meta["content_title"]
-    if meta.get("content_author") and (not author or title_is_garbage(author)):
-        author = meta["content_author"]
-    return {"title": title, "author": author, "isbn": meta.get("isbn") or meta.get("content_isbn")}
+    stem = Path(name).stem
+    if re.fullmatch(r"[\dXx\s._-]+", stem):
+        return None  # ISBN / number file name
+    t = stem
+    if " " not in t and t.count(".") >= 2:
+        t = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", t)   # dots as separators, keep 'v4.2'
+    t = re.sub(r"_+", " ", t)
+    t = _NAME_PUBLISHER.sub("", t)
+    for _ in range(3):
+        t = _NAME_TAIL.sub("", t)
+    t = re.sub(r"\s+", " ", t).strip(" -._,")
+    return None if title_is_garbage(t) else t
+
+
+def name_isbns(meta: dict[str, Any]) -> list[str]:
+    """Check-digit-valid ISBNs in the file name and the embedded title
+    ('0321670329.pdf', 'Microsoft Word - 978-1-4302-4002-0_Smithwick_Front.doc')."""
+    from .olindex import isbns_in_name
+
+    out: list[str] = []
+    for src in (meta.get("filename"), meta.get("title")):
+        for i in isbns_in_name(str(src or "")):
+            if i not in out:
+                out.append(i)
+    return out
+
+
+def lookup_fields(meta: dict[str, Any]) -> dict[str, Any]:
+    """Title/author/isbn to look up and their source. Title: embedded unless junk, else the
+    file name (downloads are usually well named), else the content-scan title unless
+    garbled. ISBN: embedded, else from the file name / embedded title, else content."""
+    from .contentscan import title_is_garbage, title_is_garbled
+
+    title, src = meta.get("title"), "embedded"
+    if not title or title_is_garbage(title, meta.get("filename")):
+        title, src = filename_title(meta.get("filename") or ""), "filename"
+        ct = meta.get("content_title")
+        ct_ok = bool(ct) and not title_is_garbage(ct) and not title_is_garbled(ct)
+        if ct_ok and (not title or len(title.split()) < 2):  # 'broken.pdf', 'book1.pdf'
+            title, src = ct, "content"
+        if not title:
+            src = None
+    author = meta.get("author")
+    if not author or title_is_garbage(author):
+        ca = meta.get("content_author")
+        author = ca if ca and not title_is_garbled(ca) else None
+    isbn = meta.get("isbn") or next(iter(name_isbns(meta)), None) or meta.get("content_isbn")
+    return {"title": title, "author": author, "isbn": isbn, "title_source": src}
+
+
+_GB_CACHE: dict[str, dict | None] = {}
+_GB_BLOCKED_UNTIL = 0.0
 
 
 def google_books(title: str | None, author: str | None, isbn: str | None,
                  api_key: str = "", client: httpx.Client | None = None) -> dict | None:
+    """Google Books lookup (only used with AIB_GOOGLE_BOOKS_ENABLED=true). Results are
+    cached per process; a 429 pauses all calls for 10 minutes instead of retrying."""
+    global _GB_BLOCKED_UNTIL
+    import time
+
     if isbn:
         q = f"isbn:{isbn}"
     elif title:
         q = f"intitle:{title}" + (f"+inauthor:{author}" if author else "")
     else:
         return None
+    if q in _GB_CACHE:
+        return _GB_CACHE[q]
+    if time.monotonic() < _GB_BLOCKED_UNTIL:
+        return None
     http = client or httpx.Client(timeout=15.0)
     params = {"q": q, "maxResults": 3} | ({"key": api_key} if api_key else {})
     try:
         r = http.get("https://www.googleapis.com/books/v1/volumes", params=params)
+        if r.status_code == 429:
+            _GB_BLOCKED_UNTIL = time.monotonic() + 600
+            return None
         r.raise_for_status()
         items = r.json().get("items") or []
     except httpx.HTTPError:
         return None
     if not items:
+        _GB_CACHE[q] = None
         return None
     v = items[0].get("volumeInfo", {})
-    return {"title": v.get("title"), "author": (v.get("authors") or [None])[0],
-            "year": int(v["publishedDate"][:4]) if v.get("publishedDate", "")[:4].isdigit()
-            else None, "source": "google_books", "match_type": "isbn" if isbn else "title",
-            "isbn": isbn}
+    out = {"title": v.get("title"), "author": (v.get("authors") or [None])[0],
+           "year": int(v["publishedDate"][:4]) if v.get("publishedDate", "")[:4].isdigit()
+           else None, "source": "google_books", "match_type": "isbn" if isbn else "title",
+           "isbn": isbn}
+    _GB_CACHE[q] = out
+    return out
 
 
 def reconcile(meta: dict[str, Any], ref: dict[str, Any] | None) -> float:
@@ -275,7 +382,7 @@ def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
     ref = None
     if ol_lookup is not None:
         ref = ol_lookup(lk["title"], lk["author"], lk["isbn"])
-    if ref is None:
+    if ref is None and getattr(s, "google_books_enabled", False):
         ref = gb_lookup(lk["title"], lk["author"], lk["isbn"], s.google_books_api_key)
     ref_score = reconcile({**meta, "title": lk["title"], "author": lk["author"]}, ref)
     if meta.get("media_type") == "ebook" and ref_score >= s.book_min_confidence:
@@ -283,9 +390,20 @@ def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
                "author": ref.get("author") or lk["author"], "series": None,
                "confidence": ref_score, "notes": f"matched {ref.get('source')}"}
     else:
-        cls = classify(ollama, path, {**meta, "reference": ref}, snippet)
+        cls = classify(ollama, path, {**meta, "reference": ref, "lookup": lk}, snippet)
+        if meta.get("media_type") == "ebook" and cls.get("kind") not in ("ebook", "audiobook"):
+            # a pdf/epub in a book folder is a book; the LLM must not drop it to 'other'
+            cls["notes"] = f"{cls.get('notes') or ''} [kind {cls.get('kind')} -> ebook]".strip()
+            cls["kind"] = "ebook"
         if ref_score:
             cls["confidence"] = round(max(cls["confidence"], (cls["confidence"] + ref_score) / 2), 3)
+    from .contentscan import title_is_garbage
+
+    if lk["title"] and (not cls.get("title") or title_is_garbage(cls.get("title"))):
+        cls["title"] = lk["title"]
+    if lk["author"] and not cls.get("author"):
+        cls["author"] = lk["author"]
+    cls["title_source"] = lk["title_source"]
     # confidence is evidence-based (bookmeta.score), not the LLM's self-rating
     from .bookmeta import evaluate
 
@@ -297,10 +415,19 @@ def catalog_file(path: Path, s: Settings, ollama: OllamaClient,
     dst = destination(cls["kind"], ev["title"] or cls.get("title"), ev["author"],
                       ev["series"], path, s)
     conf = cls["confidence"] if dst else min(cls["confidence"], s.book_review_confidence - 0.01)
+    rationale = cls.get("notes")
+    if conf < s.book_review_confidence:
+        why = ev.get("score_reason") or "low evidence"
+        if dst and cls["kind"] == "ebook" and ev["title"] and not title_is_garbage(ev["title"]):
+            # a clearly titled book is never silently rejected: a human looks at it
+            conf = s.book_review_confidence
+            rationale = f"review: {why} (clear title from {lk['title_source'] or 'llm'})"
+        else:
+            rationale = f"reject: {why}" + ("" if dst else "; no destination (no title/kind)")
     return Suggestion(domain="book", source_path=str(path), target_path=str(dst) if dst else None,
                       metadata={"embedded": meta, "reference": ref, "classification": cls},
                       confidence=round(conf, 3), decision=decide(conf, s),
-                      rationale=cls.get("notes"), media_kind=cls["kind"],
+                      rationale=rationale, media_kind=cls["kind"],
                       op="move" if dst else "none", run_id=run_id)
 
 

@@ -894,16 +894,22 @@ class Database:
                if r["target_path"] and r["status"] == "applied"}
         return {"suggested": src, "applied": dst}
 
-    def book_rescan_candidates(self, statuses: Sequence[str], review_open: bool,
-                               limit: int | None = None) -> list[dict[str, Any]]:
-        """Book suggestions to re-catalog: rows with one of ``statuses`` plus (``review_open``)
-        open rows whose decision is review/reject (low confidence). Never applied ones."""
+    def book_rescan_candidates(self, statuses: Sequence[str], open_decisions: Sequence[str] = (),
+                               limit: int | None = None, ids: Sequence[int] | None = None
+                               ) -> list[dict[str, Any]]:
+        """Book suggestions to re-catalog: rows with one of ``statuses`` plus open rows whose
+        decision is in ``open_decisions`` (review / reject), optionally only ``ids``.
+        Applied ones never."""
+        if isinstance(open_decisions, bool):  # old signature: review_open flag
+            open_decisions = ("review", "reject") if open_decisions else ()
         with self.conn() as c:
             return c.execute(
                 "SELECT id, source_path, status, decision, confidence, media_kind, rationale "
                 "FROM aib.suggestion WHERE domain='book' AND status <> 'applied' AND "
-                "(status = ANY(%s) OR (%s AND status='open' AND decision IN ('review','reject'))) "
-                "ORDER BY id LIMIT %s", (list(statuses), review_open, limit)).fetchall()
+                "(status = ANY(%s) OR (status='open' AND decision = ANY(%s))) "
+                "AND (%s::bigint[] IS NULL OR id = ANY(%s)) ORDER BY id LIMIT %s",
+                (list(statuses), list(open_decisions), list(ids) if ids else None,
+                 list(ids) if ids else None, limit)).fetchall()
 
     def rescan_suggestion(self, sid: int, old_status: str, s: Suggestion,
                           details: dict[str, Any]) -> str | None:

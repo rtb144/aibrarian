@@ -171,31 +171,39 @@ def _book_scan(ctx, paths, resume, max_items, flow_run_id, reporter) -> dict[str
     return {"run_id": run_id, **counts}
 
 
-RESCAN_DEFAULT_STATUSES = ("error", "needs_review", "review")
-"""'review' = open suggestions whose decision is review/reject (below book_min_confidence;
-book-scan stores low-confidence items as status 'open'); 'needs_review' is what
-books autoapply sets for low scores / missing title or author; 'error' is a timeout/crash."""
+RESCAN_DEFAULT_STATUSES = ("error", "needs_review", "review", "reject")
+RESCAN_DECISIONS = ("review", "reject", "suggest", "auto")
+"""'review' / 'reject' (/'suggest' / 'auto') = OPEN suggestions with that decision
+(book-scan stores low-confidence items as status 'open', decision review/reject);
+'needs_review' is what books autoapply sets for low scores / missing title or author;
+'error' is a timeout/crash. Any other value is a literal status."""
 
 
 def book_rescan(ctx: Context, statuses: list[str] | None = None, execute: bool = False,
-                limit: int | None = None, sample: int = 10, progress=None) -> dict[str, Any]:
-    """Re-run catalog_file for book suggestions with ``statuses`` and update each row in
-    place (same id; change_log op 'rescan' with old->new score/status). Dry run unless
-    ``execute``: count + sample only. Applied suggestions are never touched. Holds the
-    book-scan advisory lock (BOOK_SCAN_LOCK) so it never overlaps a book-scan."""
+                limit: int | None = None, sample: int = 10, progress=None,
+                ids: list[int] | None = None) -> dict[str, Any]:
+    """Re-run catalog_file for book suggestions with ``statuses`` (or exactly ``ids``,
+    any non-applied status) and update each row in place (same id; change_log op
+    'rescan' with old->new score/status). Dry run unless ``execute``: count + sample
+    only. Applied suggestions are never touched. Holds the book-scan advisory lock
+    (BOOK_SCAN_LOCK) so it never overlaps a book-scan."""
+    if ids and not statuses:
+        statuses = ["open", "error", "needs_review", "failed", "noop", "dismissed",
+                    "quarantined_dst_exists"]
     statuses = list(dict.fromkeys(statuses or RESCAN_DEFAULT_STATUSES))
-    bad = [x for x in statuses if x == "applied"]
-    if bad:
+    if "applied" in statuses:
         raise ValueError("applied suggestions are never rescanned")
     with ctx.db.try_lock(BOOK_SCAN_LOCK) as got:
         if not got:
             return {"locked": 1, "message": "book-scan is running (advisory lock 724413 held); "
                     "try again when it has finished", "execute": execute}
-        rows = ctx.db.book_rescan_candidates([x for x in statuses if x != "review"],
-                                             "review" in statuses, limit)
+        lit = [x for x in statuses if x not in RESCAN_DECISIONS]
+        dec = [x for x in statuses if x in RESCAN_DECISIONS]
+        rows = (ctx.db.book_rescan_candidates(lit, dec, limit, ids) if ids
+                else ctx.db.book_rescan_candidates(lit, dec, limit))
         by_status: dict[str, int] = {}
         for r in rows:
-            k = "review" if r["status"] == "open" else r["status"]
+            k = r["decision"] if r["status"] == "open" and r["decision"] in dec else r["status"]
             by_status[k] = by_status.get(k, 0) + 1
         res: dict[str, Any] = {"execute": execute, "statuses": statuses, "count": len(rows),
                                "by_status": by_status,

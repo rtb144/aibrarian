@@ -60,10 +60,42 @@ CREATE TABLE IF NOT EXISTS edition (key TEXT PRIMARY KEY, rev INT, title TEXT, s
     work_key TEXT, author_keys TEXT, isbns TEXT) WITHOUT ROWID;
 """
 DERIVED = """
-DROP TABLE IF EXISTS isbn; DROP TABLE IF EXISTS tkey;
+DROP TABLE IF EXISTS isbn; DROP TABLE IF EXISTS tkey; DROP TABLE IF EXISTS ttitle;
 CREATE TABLE isbn (isbn13 TEXT, edition_key TEXT, PRIMARY KEY (isbn13, edition_key)) WITHOUT ROWID;
 CREATE TABLE tkey (skey TEXT, work_key TEXT, edition_key TEXT, title TEXT);
 """
+TITLE_INDEX = """
+DROP TABLE IF EXISTS ttitle;
+CREATE TABLE ttitle (et TEXT, work_key TEXT, edition_key TEXT, title TEXT);
+"""
+
+
+def _derive_titles(c: sqlite3.Connection, own_txn: bool = True) -> None:
+    """Title-only lookup table keyed by :func:`etitle` (works + editions without a work)."""
+    c.create_function("etitle", 1, etitle, deterministic=True)
+    c.executescript(TITLE_INDEX)
+    if own_txn:
+        c.execute("BEGIN")
+    c.execute("INSERT INTO ttitle SELECT etitle(w.title), w.key, NULL, w.title FROM work w "
+              "WHERE w.title IS NOT NULL")
+    c.execute("INSERT INTO ttitle SELECT etitle(e.title), NULL, e.key, e.title FROM edition e "
+              "WHERE e.work_key IS NULL AND e.title IS NOT NULL")
+    if own_txn:
+        c.execute("COMMIT")
+    c.execute("CREATE INDEX ttitle_et ON ttitle (et)")
+
+
+def add_title_index(path: Path, log: Callable[[str], None] = print) -> dict[str, Any]:
+    """Add the title-only table to an existing index without a full rebuild."""
+    t0 = time.monotonic()
+    c = _connect(Path(path), build=True)
+    try:
+        _derive_titles(c)
+        n = c.execute("SELECT count(*) FROM ttitle").fetchone()[0]
+    finally:
+        c.close()
+    log(f"ttitle: {n} rows in {time.monotonic() - t0:.0f}s")
+    return {"rows_ttitle": n, "seconds": round(time.monotonic() - t0)}
 UPSERT = {
     "author": "INSERT INTO author VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET "
               "rev=excluded.rev, name=excluded.name WHERE excluded.rev >= author.rev",
@@ -234,6 +266,32 @@ def ntitle(title: Any) -> str:
     title = as_str(title)
     t = re.split(r":| - |\(", title or "", maxsplit=1)[0]
     return _ART.sub("", norm(t))
+
+
+_PUBLISHERS = (r"wiley|wrox( press)?|o ?reilly( media)?|apress|packt( publishing)?|manning|"
+               r"addison wesley|prentice hall|mcgraw hill|no starch( press)?|pragmatic "
+               r"(bookshelf|programmers)|sams|que|new riders|peachpit|microsoft press|"
+               r"cengage|springer|elsevier|focal press|sybex|ebook|e book|pdf")
+_ED_WORDS = (r"\d+(st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|"
+             r"tenth|\d+")
+_EDITION = re.compile(rf"\b(({_ED_WORDS}) (edition|ed|edn)|(edition|ed|edn|version|ver|rev|v) ?"
+                      rf"\d+( \d+)*|revised edition|updated edition|international edition|"
+                      rf"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]* \d{{4}}|"
+                      rf"(19|20)\d\d|retail|ebook)\b")
+
+
+def etitle(title: Any) -> str:
+    """Edition/number-insensitive title key: 'Wiley.Data.Structures.and.Algorithms.in.Java.
+    5th.Edition.Mar.2010' and 'Data Structures & Algorithms in Java (5th ed.)' both give
+    'data structures and algorithms in java'."""
+    t = as_str(title) or ""
+    t = re.sub(r"[._]+", " ", t).replace("&", " and ")
+    t = norm(t)
+    t = re.sub(rf"^({_PUBLISHERS}) ", "", t)
+    t = re.sub(r"^(the|a|an) ", "", t)
+    t = _EDITION.sub(" ", t)
+    t = re.sub(r"\b(edition|ed)$", " ", t.strip())
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def surname(name: Any) -> str:
@@ -420,6 +478,7 @@ def _derive(c: sqlite3.Connection) -> None:
               "WHERE e.work_key IS NULL")
     c.execute("COMMIT")
     c.execute("CREATE INDEX tkey_skey ON tkey (skey)")
+    _derive_titles(c)
 
 
 # -- read side ----------------------------------------------------------------------
@@ -488,21 +547,7 @@ class OLIndex:
                             "source": "openlibrary-index", "confidence": 1.0}
         return None
 
-    def by_title(self, title: str, author: str | None, limit: int = 2000) -> dict | None:
-        sn, nt = surname(author), ntitle(title)
-        if not sn or not nt:
-            return None
-        lo = f"{sn}|{nt[:3]}"
-        rows = self.c.execute("SELECT * FROM tkey WHERE skey >= ? AND skey < ? LIMIT ?",
-                              (lo, lo + "\uffff", limit)).fetchall()
-        best, bs = None, 0.0
-        for r in rows:
-            s = fuzz.token_set_ratio(nt, r["skey"].split("|", 1)[1]) / 100
-            s = s if fuzz.ratio(nt, r["skey"].split("|", 1)[1]) >= 60 else s * 0.9
-            if s > bs:
-                best, bs = r, s
-        if not best or bs < 0.7:
-            return None
+    def _ref(self, best, sn: str = "") -> dict[str, Any]:
         if best["work_key"]:
             w = self.c.execute("SELECT * FROM work WHERE key=?", (best["work_key"],)).fetchone()
             names = self._names(w["author_keys"])
@@ -513,8 +558,61 @@ class OLIndex:
             ref = self.edition(best["edition_key"]) or {}
             ref["authors"] = sorted(ref.get("authors") or [], key=lambda n: surname(n) != sn)
         ref["author"] = (ref.get("authors") or [None])[0]
-        return ref | {"match_type": "title", "source": "openlibrary-index",
-                      "confidence": round(bs, 3)}
+        return ref
+
+    def by_title(self, title: str, author: str | None, limit: int = 2000) -> dict | None:
+        sn, nt, et = surname(author), ntitle(title), etitle(title)
+        if not sn or not nt:
+            return None
+        rows = []
+        for key in dict.fromkeys(k for k in (nt[:3], et[:3]) if k):
+            lo = f"{sn}|{key}"
+            rows += self.c.execute("SELECT * FROM tkey WHERE skey >= ? AND skey < ? LIMIT ?",
+                                   (lo, lo + "\uffff", limit)).fetchall()
+        best, bs = None, 0.0
+        for r in rows:
+            rt = r["skey"].split("|", 1)[1]
+            s = fuzz.token_set_ratio(nt, rt) / 100
+            s = s if fuzz.ratio(nt, rt) >= 60 else s * 0.9
+            if et:
+                e2 = etitle(r["title"]) or rt
+                s = max(s, fuzz.ratio(et, e2) / 100)
+            if s > bs:
+                best, bs = r, s
+        if not best or bs < 0.7:
+            return None
+        return self._ref(best, sn) | {"match_type": "title", "source": "openlibrary-index",
+                                      "confidence": round(bs, 3)}
+
+    def has_title_index(self) -> bool:
+        if not hasattr(self, "_tt"):
+            self._tt = bool(self.c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                                           "name='ttitle'").fetchone())
+        return self._tt
+
+    def by_title_only(self, title: str, limit: int = 3000) -> dict | None:
+        """Title-only fallback (no/unknown author): exact edition-insensitive key first, then
+        fuzzy within the same first two words. Needs the ttitle table (add-title-index)."""
+        et = etitle(title)
+        if len(et) < 4 or not self.has_title_index():
+            return None
+        rows = self.c.execute("SELECT * FROM ttitle WHERE et=? LIMIT 50", (et,)).fetchall()
+        best, bs = (rows[0], 1.0) if rows else (None, 0.0)
+        if best is not None and len(rows) > 1:  # prefer a work with authors over a stray edition
+            best = next((r for r in rows if r["work_key"]), rows[0])
+        if best is None:
+            words = et.split()
+            lo = " ".join(words[:2])
+            for r in self.c.execute("SELECT * FROM ttitle WHERE et >= ? AND et < ? LIMIT ?",
+                                    (lo, lo + "\uffff", limit)):
+                sc = fuzz.ratio(et, r["et"]) / 100
+                if sc > bs:
+                    best, bs = r, sc
+            if bs < 0.88:
+                return None
+        ref = self._ref(best)
+        return ref | {"match_type": "title_only", "source": "openlibrary-index",
+                      "confidence": round(bs * 0.9, 3)}
 
     def lookup(self, title: str | None, author: str | None,
                isbns: Iterable[str] | str | None = None) -> dict[str, Any] | None:
@@ -528,7 +626,10 @@ class OLIndex:
             hit = self.by_isbn(i)
             if hit:
                 return hit
-        return self.by_title(title, author) if title and author else None
+        if not title:
+            return None
+        hit = self.by_title(title, author) if author else None
+        return hit or self.by_title_only(title)
 
 
 def open_index(s) -> OLIndex | None:

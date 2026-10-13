@@ -54,6 +54,30 @@ def title_is_garbage(title: str | None, filename: str | None = None) -> bool:
     return False
 
 
+def title_is_garbled(title: str | None) -> bool:
+    """Text-layer garbage from a title page, e.g. small-caps glyphs that lost their first
+    letters ('EITEL OW TO ROGRAM ERIES') or kerning fragments ('usy Co de id to ro lo')."""
+    t = (title or "").strip()
+    words = re.findall(r"[^\W\d_]+", t)
+    if not words:
+        return True
+    letters = "".join(words)
+    vowels = sum(c in "aeiouyAEIOUY" for c in letters) / len(letters)
+    if len(letters) >= 6 and not 0.2 <= vowels <= 0.7:
+        return True
+    short = sum(len(w) <= 2 for w in words)
+    if len(words) >= 3 and short / len(words) >= 0.4:
+        return True
+    if len(words) >= 3 and sum(len(w) for w in words) / len(words) < 3.2:
+        return True
+    lower_start = sum(w[0].islower() for w in words)
+    camel = bool(re.match(r"[a-z]+[A-Z]", t))  # iOS, eBay, iPhone
+    if len(words) >= 3 and lower_start / len(words) > 0.6 and not t[0].isupper() and not camel:
+        return True  # starts mid-word ('usy Co ...')
+    return (t[0].islower() and len(words) >= 2 and not camel
+            and not re.match(r"(a|an|the|on|of|in|for|to|and|e)\b", t))
+
+
 def weak_reasons(meta: dict[str, Any]) -> list[str]:
     """Why embedded metadata is weak (empty list = strong enough, skip the scan)."""
     out = []
@@ -149,7 +173,8 @@ def title_from_spans(spans: list[tuple[float, str]]) -> tuple[str | None, str | 
     title = None
     for sz in sizes[:3]:
         cand = _clean(" ".join(t for s, t in spans if s == sz))[:200]
-        if len(cand) >= 2 and not title_is_garbage(cand) and len(cand) <= 150:
+        if (2 <= len(cand) <= 150 and not title_is_garbage(cand)
+                and not title_is_garbled(cand)):
             title = cand
             break
     author = None
@@ -165,8 +190,9 @@ def title_from_spans(spans: list[tuple[float, str]]) -> tuple[str | None, str | 
 
 # -- readers --------------------------------------------------------------------
 def pdf_pages(path: Path, deadline: float) -> tuple[list[str], list[tuple[float, str]]]:
-    import fitz  # pymupdf
+    from .books import mupdf
 
+    fitz = mupdf()
     pages: list[str] = []
     spans: list[tuple[float, str]] = []
     total = 0

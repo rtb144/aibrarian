@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 
@@ -32,10 +33,31 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, default=str)
 
 
+_SECRET_PARAM = re.compile(r"(?i)\b(key|api_key|apikey|access_token|token)=([^&\s\"']+)")
+
+
+def redact(text: str) -> str:
+    """Mask API keys in URLs / query strings (``?key=AIza...`` -> ``?key=***``)."""
+    return _SECRET_PARAM.sub(r"\1=***", text)
+
+
+class RedactFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        red = redact(msg)
+        if red != msg:
+            record.msg, record.args = red, None
+        return True
+
+
 def setup_logging(service: str, level: str = "INFO", json_logs: bool = True) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter(service) if json_logs
                          else logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root = logging.getLogger()
+    handler.addFilter(RedactFilter())
     root.handlers[:] = [handler]
+    # httpx/httpcore log every request URL at INFO (incl. query-string API keys)
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     root.setLevel(level.upper())

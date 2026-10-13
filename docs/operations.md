@@ -567,9 +567,25 @@ embedded, and a 1500-char snippet of the title/copyright pages goes into the LLM
 stored). Budget `AIB_BOOK_CONTENT_SCAN_S` (default 15s), max 200k chars; mobi/azw3/cbr/cbz
 are skipped.
 
-`aibrarian books rescan [--status S ...] [--limit N] [--execute]` re-catalogs book
-suggestions in place (same id) - default statuses `error`, `needs_review` and `review`
-(= status `open` with decision review/reject). Dry run prints count + sample. Each update
+Titles for lookups: embedded title unless junk, else the file name (publisher prefixes,
+dots/underscores, `Mar.2010`-style dates stripped; `0321670329.pdf` gives no title but an
+ISBN), else the content title unless garbled (small-caps glyph loss, fragments). ISBNs also
+come from the file name and the embedded title (`Microsoft Word - 978-1-4302-4002-0_...`).
+The LLM cannot turn a pdf/epub into kind `other`, and a book with a clear title is never
+rejected for weak evidence alone: it goes to `review` (rationale `review: <reason>`);
+rejections carry `reject: <reason>`.
+
+Reference source is the local Open Library index: ISBN, then surname + title, then a
+title-only lookup on an edition-insensitive key (`etitle`: no `5th Edition`, `v4.2`, years,
+`Wiley.`/`Wrox Press` prefixes). Indexes built before this need the title table once:
+`aibrarian openlibrary add-title-index` (minutes, writes OL_INDEX_PATH; new builds include
+it). Google Books is off (`AIB_GOOGLE_BOOKS_ENABLED=false`); when enabled, results are
+cached per process and a 429 pauses calls for 10 minutes. httpx request logs are WARNING
+only and `key=` query params are redacted in all logs.
+
+`aibrarian books rescan [--status S ...] [--id N ...] [--limit N] [--execute]` re-catalogs
+book suggestions in place (same id) - default statuses `error`, `needs_review`, `review`
+and `reject` (the last two = status `open` with that decision); `--id` picks exact rows. Dry run prints count + sample. Each update
 writes a change_log row (op `rescan`, details old/new status, decision, confidence). Applied
 suggestions are never touched. It takes the book-scan advisory lock 724413 and exits with
 code 3 and a message if a book-scan is running.
