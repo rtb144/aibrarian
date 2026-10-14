@@ -355,3 +355,26 @@ def test_book_rescan_candidates_and_in_place_update(db):
         log = c.execute("SELECT * FROM aib.change_log WHERE op='rescan'").fetchall()
     assert len(log) == 1 and log[0]["entity_id"] == err
     assert log[0]["details"]["old_status"] == "error" and log[0]["details"]["new_status"] == "open"
+
+
+def test_claim_does_not_take_one_lock_per_candidate_row(db):
+    """Regression: pg_try_advisory_xact_lock in the claim's WHERE ran for every row in the
+    stage before ORDER BY/LIMIT, holding one lock-table slot per row until commit ->
+    'out of shared memory / increase max_locks_per_transaction' with a big backlog."""
+    import psycopg
+
+    n = 30000
+    with db.conn() as c:
+        c.execute("INSERT INTO aib.media_file (path, root, kind, size_bytes, mtime, fingerprint, "
+                  "stage) SELECT '/m/01-movies/f' || g || '.mkv', '01-movies', 'video', 1, 1, "
+                  "'fp', 'probed' FROM generate_series(1, %s) g", (n,))
+        c.commit()
+    with psycopg.connect(DSN, autocommit=True) as other:  # a move holds this path's key
+        other.execute("SELECT pg_advisory_lock(hashtextextended('/m/01-movies/f1.mkv', 0))")
+        rows = db.claim("probed", None, 3, "w1")
+        assert len(rows) == 3 and "/m/01-movies/f1.mkv" not in {r["path"] for r in rows}
+    with db.conn() as c:  # nothing left behind in this or any session
+        held = c.execute("SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory'"
+                         ).fetchone()["n"]
+    assert held == 0
+    assert len(db.claim("probed", None, 5, "w2")) == 5

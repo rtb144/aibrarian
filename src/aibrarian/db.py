@@ -610,22 +610,34 @@ class Database:
               worker: str, lease_minutes: int = 360) -> list[dict[str, Any]]:
         """Lease up to ``limit`` items sitting in ``stage``. Uses SKIP LOCKED so
         concurrent workers never get the same item; stale leases expire."""
+        # Candidates first (bounded, row-locked, SKIP LOCKED), THEN the path-lock probe on
+        # at most that many rows. The probe takes the session lock and releases it at once
+        # (try+unlock): a free key means no move holds it, and no lock-table slot is kept.
+        # It used to be pg_try_advisory_xact_lock in the WHERE, which Postgres evaluated for
+        # EVERY row in the stage before ORDER BY/LIMIT and held until commit - one shared
+        # lock slot per backlog row -> "out of shared memory, max_locks_per_transaction".
+        # A move that starts right after the probe still sees the fresh lease (changelog).
         sql = """
-        UPDATE aib.media_file SET locked_by=%s, locked_at=now()
-        WHERE id IN (
-            SELECT id FROM aib.media_file
+        WITH cand AS MATERIALIZED (
+            SELECT id, path FROM aib.media_file
             WHERE stage=%s AND NOT missing AND kind='video'
               AND (%s::text[] IS NULL OR root = ANY(%s::text[]))
               AND (locked_at IS NULL OR locked_at < now() - make_interval(mins => %s))
-              -- a move in progress holds this key (Database.path_locks): skip the item
-              AND pg_try_advisory_xact_lock(hashtextextended(path, 0))
             ORDER BY stage_changed_at LIMIT %s
-            FOR UPDATE SKIP LOCKED)
+            FOR UPDATE SKIP LOCKED),
+        free AS MATERIALIZED (
+            SELECT id FROM cand
+            WHERE pg_try_advisory_lock(hashtextextended(path, 0))
+              AND pg_advisory_unlock(hashtextextended(path, 0))
+            LIMIT %s)
+        UPDATE aib.media_file SET locked_by=%s, locked_at=now()
+        WHERE id IN (SELECT id FROM free)
         RETURNING *
         """
         r = list(roots) if roots else None
+        probe = max(limit * 4, limit + 20)  # spare candidates for paths a move holds
         with self.conn() as c:
-            rows = c.execute(sql, (worker, stage, r, r, lease_minutes, limit)).fetchall()
+            rows = c.execute(sql, (stage, r, r, lease_minutes, probe, limit, worker)).fetchall()
             c.commit()
         return rows
 

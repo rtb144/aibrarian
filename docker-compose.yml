@@ -51,6 +51,8 @@ services:
   postgres:
     image: postgres:16
     restart: unless-stopped
+    # headroom for advisory/relation locks (default 64); changing it needs a restart
+    command: ["postgres", "-c", "max_locks_per_transaction=256"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aibrarian}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
