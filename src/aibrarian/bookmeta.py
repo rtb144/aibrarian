@@ -107,6 +107,33 @@ def _ratio(a: str | None, b: str | None) -> float:
     return fuzz.token_set_ratio(norm(str(a)), norm(str(b))) / 100
 
 
+def _author_ratio(a: str | None, b: str | None) -> float:
+    """Author agreement, accent/case/punctuation-insensitive: same surname and same first
+    initial = 1.0 ('Lawrence M. Krauss' ~ 'Lawrence Maxwell Krauss', 'Ben Dupre' ~
+    'Ben Dupré', 'Warburton, Nigel' ~ 'Nigel Warburton'); multi-author strings match on
+    any pair; else fuzzy token-set ratio."""
+    if not a or not b:
+        return 0.0
+    from .olindex import surname
+    from .openlibrary import norm
+
+    def first_initial(n: str) -> str:
+        n = n.split(";")[0]
+        if "," in n:
+            n = n.split(",", 1)[1]
+        toks = norm(n).split()
+        return toks[0][:1] if toks else ""
+
+    best = _ratio(a, b)
+    for x in str(a).split(";"):
+        for y in str(b).split(";"):
+            sx, sy = surname(x), surname(y)
+            if sx and sx == sy:
+                fx, fy = first_initial(x), first_initial(y)
+                best = max(best, 1.0 if (fx == fy or not fx or not fy) else 0.75)
+    return best
+
+
 def is_junk_title(t: str | None) -> bool:
     return not t or bool(_JUNK_TITLE.match(str(t).strip()))
 
@@ -114,9 +141,17 @@ def is_junk_title(t: str | None) -> bool:
 def score(embedded: dict[str, Any], ref: dict[str, Any] | None,
           title: str | None, author: str | None) -> tuple[float, str]:
     """``(confidence, why)`` from the evidence; ``title``/``author`` are the final values."""
+    from .contentscan import title_is_garbage
+
     emb_t, emb_a = embedded.get("title"), embedded.get("author")
-    if is_junk_title(emb_t):
+    if is_junk_title(emb_t) or title_is_garbage(emb_t, embedded.get("filename")):
         emb_t = None
+    src = "embedded"
+    if not emb_t and embedded.get("name_title"):  # 'Title - Author.mobi'
+        emb_t, src = embedded["name_title"], "file name"
+        emb_a = emb_a or embedded.get("name_author")
+    elif not emb_a and embedded.get("name_author"):
+        emb_a = embedded["name_author"]
     ref = ref or {}
     isbn_hit = ref.get("match_type") == "isbn" or (
         embedded.get("isbn") and embedded.get("isbn") in (ref.get("isbn13"), ref.get("isbn10"),
@@ -126,13 +161,16 @@ def score(embedded: dict[str, Any], ref: dict[str, Any] | None,
         s, why = (0.97, "ISBN match, title agrees") if t >= 0.8 else \
             (0.85, f"ISBN match, title differs ({t:.0%})")
     elif emb_t and emb_a and ref:
-        t, a = _ratio(emb_t, ref.get("title")), _ratio(emb_a, ref.get("author"))
-        s, why = 0.50 + 0.45 * min(t, a), f"embedded title {t:.0%} / author {a:.0%} vs reference"
+        t = max(_ratio(emb_t, ref.get("title")), _ratio(clean_title(emb_t)["title"],
+                                                         ref.get("title")))
+        a = max([_author_ratio(emb_a, x) for x in (ref.get("authors") or [])]
+                + [_author_ratio(emb_a, ref.get("author"))])
+        s, why = 0.50 + 0.45 * min(t, a), f"{src} title {t:.0%} / author {a:.0%} vs reference"
     elif emb_t and emb_a:
-        s, why = 0.70, "embedded title+author, no reference"
+        s, why = (0.70 if src == "embedded" else 0.65), f"{src} title+author, no reference"
     elif emb_t and ref:
         t = _ratio(emb_t, ref.get("title"))
-        s, why = 0.40 + 0.30 * t, f"embedded title only ({t:.0%} vs reference)"
+        s, why = 0.40 + 0.30 * t, f"{src} title only ({t:.0%} vs reference)"
     elif is_junk_title(title):
         s, why = 0.10, "no usable title (junk file name)"
     else:
@@ -167,9 +205,10 @@ def evaluate(sug: dict[str, Any], ref_lookup=None) -> dict[str, Any]:
         isbns = [i for i in [isbn13(emb.get("isbn"))] + opf_isbns(src) + isbns_in_name(src.name)
                  + isbns_in_name(str(emb.get("title") or ""))
                  + [isbn13(x) for x in emb.get("content_isbns") or []] if i]
-        q_title = clean_title(raw_title or cls.get("title"))["title"]
+        q_title = clean_title(raw_title or emb.get("name_title") or cls.get("title"))["title"]
         try:
-            hit = ref_lookup(q_title, emb.get("author") or cls.get("author"),
+            hit = ref_lookup(q_title, emb.get("author") or emb.get("name_author")
+                             or cls.get("author"),
                              list(dict.fromkeys(isbns)))
         except Exception:
             hit = None
@@ -177,17 +216,17 @@ def evaluate(sug: dict[str, Any], ref_lookup=None) -> dict[str, Any]:
             ref = hit
             if hit.get("match_type") == "isbn" and not emb.get("isbn"):
                 emb = emb | {"isbn": hit.get("isbn13")}
-    raw_title = raw_title or ref.get("title") or cls.get("title")
+    raw_title = raw_title or ref.get("title") or emb.get("name_title") or cls.get("title")
     if is_junk_title(raw_title):
         raw_title = None
-    author = emb.get("author") or ref.get("author") or cls.get("author")
+    author = emb.get("author") or emb.get("name_author") or ref.get("author") or cls.get("author")
     c = clean_title(raw_title, emb.get("series") or cls.get("series"), emb.get("series_index"))
     conf, why = score(emb, ref or None, c["title"], author)
     if ref.get("source") == "openlibrary-index":
         why += f" [Open Library {ref.get('edition_key') or ref.get('work_key')}]"
         # canonical author spelling from Open Library when the match is strong
         if ref.get("author") and conf >= 0.85 and (
-                not author or _ratio(author, ref["author"]) >= 0.8
+                not author or _author_ratio(author, ref["author"]) >= 0.8
                 or ref.get("match_type") == "isbn"):
             author = ref["author"]
         if not c["subtitle"] and ref.get("subtitle") and _GENRE.match(ref["subtitle"]):

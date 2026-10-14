@@ -263,6 +263,82 @@ def _book_rescan(ctx: Context, rows: list[dict[str, Any]], progress=None) -> dic
     return {"run_id": run_id, **counts, "changes": changes}
 
 
+def book_explain(ctx: Context, sid: int | None = None, path: str | None = None,
+                 run_catalog: bool = False) -> dict[str, Any]:
+    """Read-only diagnosis of one book: extracted metadata, lookup fields, every Open
+    Library lookup tried (ISBNs, title+author, title-only) with its hit, and the score
+    breakdown. ``run_catalog`` also runs the full catalog_file (LLM included) without
+    saving anything."""
+    from .bookmeta import evaluate
+    from .olindex import isbn13, make_ref_lookup, open_index
+    from .timeouts import alarm, env_seconds
+
+    sug = ctx.db.get_suggestion(sid) if sid is not None else None
+    if sid is not None and sug is None:
+        raise KeyError(sid)
+    p = Path(path or sug["source_path"])
+    out: dict[str, Any] = {"path": str(p), "exists": p.is_file()}
+    if sug:
+        md = sug.get("metadata") or {}
+        out["stored"] = {k: sug.get(k) for k in ("id", "status", "decision", "confidence",
+                                                  "rationale", "target_path", "media_kind")}
+        out["stored"]["classification"] = md.get("classification")
+    if not p.is_file():
+        return out
+    with alarm(env_seconds("AIB_BOOK_EXTRACT_TIMEOUT_S", 120)):
+        meta = books.extract_metadata(p)
+    out["meta"] = {k: v for k, v in meta.items() if k != "content_snippet"}
+    lk = books.lookup_fields(meta)
+    out["lookup_fields"] = lk
+    isbns = list(dict.fromkeys(i for i in [isbn13(lk["isbn"])]
+                               + [isbn13(x) for x in books.name_isbns(meta)]
+                               + [isbn13(x) for x in meta.get("content_isbns") or []] if i))
+    tries: list[dict[str, Any]] = []
+    idx = open_index(ctx.settings)
+    out["ol_index"] = {"path": str(getattr(ctx.settings, "ol_index_path", "")),
+                       "open": idx is not None,
+                       "title_table": bool(idx and idx.has_title_index())}
+    ref = None
+    if idx is not None:
+        def tr(kind, args, fn):
+            try:
+                hit = fn()
+            except Exception as exc:  # report, keep going
+                hit = {"error": str(exc)}
+            tries.append({"lookup": kind, "query": args, "hit": hit})
+            return hit if hit and "error" not in hit else None
+        from .olindex import etitle, ntitle, surname
+
+        for i in isbns:
+            ref = ref or tr("isbn", i, lambda i=i: idx.by_isbn(i))
+        if lk["title"] and lk["author"]:
+            hit = tr("title+author", {"title": lk["title"], "author": lk["author"],
+                                      "ntitle": ntitle(lk["title"]), "etitle": etitle(lk["title"]),
+                                      "surname": surname(lk["author"])},
+                     lambda: idx.by_title(lk["title"], lk["author"]))
+            ref = ref or hit
+        if lk["title"]:
+            hit = tr("title_only", {"title": lk["title"], "etitle": etitle(lk["title"])},
+                     lambda: idx.by_title_only(lk["title"]))
+            ref = ref or hit
+    out["ol_lookups"] = tries
+    cls = (out.get("stored") or {}).get("classification") or {
+        "kind": "ebook", "title": lk["title"], "author": lk["author"]}
+    out["score"] = evaluate({"source_path": str(p), "media_kind": cls.get("kind"),
+                             "metadata": {"embedded": meta, "reference": ref,
+                                          "classification": cls}},
+                            make_ref_lookup(ctx.settings))
+    if run_catalog:
+        rl = make_ref_lookup(ctx.settings)
+        ol = (lambda t, a, i: rl(t, a, [i] if i else [])) if rl else make_ol_lookup(ctx.db)
+        new = books.catalog_file(p, ctx.settings, ctx.ollama, ol_lookup=ol, ref_lookup=rl,
+                                 extract=lambda q: dict(meta))
+        out["catalog"] = {"confidence": new.confidence, "decision": new.decision,
+                          "rationale": new.rationale, "target_path": new.target_path,
+                          "media_kind": new.media_kind}
+    return out
+
+
 def _allowed_roots(ctx: Context) -> list[Path]:
     s = ctx.settings
     return [s.media_root, s.calibre_dir, s.audiobooks_dir, s.podcasts_dir]

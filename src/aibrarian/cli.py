@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--run", help="run id, e.g. books-20261012T095000Z or prefect:<id>")
     bu.add_argument("--execute", action="store_true")
 
+    bx = bks.add_parser("explain", help="read-only: extracted metadata, Open Library lookups "
+                        "tried + hits, score breakdown for one book")
+    bx.add_argument("--id", type=int, help="suggestion id")
+    bx.add_argument("--path", help="file path (no suggestion needed)")
+    bx.add_argument("--catalog", action="store_true", help="also run the full catalog "
+                    "(LLM call) and show the new score; nothing is saved")
     br = bks.add_parser("rescan", help="re-catalog error / low-confidence book suggestions in "
                         "place (dry run unless --execute; holds the book-scan lock)")
     br.add_argument("--status", action="append", help="error | needs_review | review | reject "
@@ -497,6 +503,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
 
         res = services.book_autoapply(ctx, args.execute, args.limit, progress=_say)
         print(json.dumps(res, indent=2, default=str) if args.json else format_result(res), end="")
+    elif cmd == "books" and args.books_cmd == "explain":
+        if args.id is None and not args.path:
+            print("give --id N or --path FILE", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(services.book_explain(ctx, args.id, args.path, args.catalog),
+                             indent=2, default=str, ensure_ascii=False))
+        except KeyError:
+            print(f"no suggestion {args.id}", file=sys.stderr)
+            return 1
     elif cmd == "books" and args.books_cmd == "rescan":
         if "applied" in (args.status or []):
             print("applied suggestions are never rescanned", file=sys.stderr)

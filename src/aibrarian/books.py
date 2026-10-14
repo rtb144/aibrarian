@@ -163,6 +163,63 @@ def pdf_metadata(path: Path) -> dict[str, Any]:
     return _pypdf_metadata(path)
 
 
+_EXTH = {100: "author", 101: "publisher", 103: "description", 104: "isbn", 105: "subject",
+         106: "date", 113: "asin", 503: "title", 524: "language"}
+
+
+def mobi_metadata(path: Path) -> dict[str, Any]:
+    """Title/author/ISBN/publisher from a MOBI/AZW3 (PalmDB record 0: MOBI header full name
+    + EXTH records). Pure Python, reads only the first record."""
+    import struct
+
+    with open(path, "rb") as fh:
+        head = fh.read(78)
+        if len(head) < 78 or head[60:68] not in (b"BOOKMOBI", b"TEXtREAd"):
+            raise ValueError("not a MOBI/PalmDB file")
+        n = struct.unpack(">H", head[76:78])[0]
+        offs = fh.read(8 * min(n, 2))
+        r0 = struct.unpack(">I", offs[:4])[0]
+        r1 = struct.unpack(">I", offs[8:12])[0] if n > 1 else r0 + 65536
+        fh.seek(r0)
+        rec = fh.read(max(0, min(r1 - r0, 1 << 20)))
+    if rec[16:20] != b"MOBI":
+        return {}
+    hlen, enc = struct.unpack(">I", rec[20:24])[0], struct.unpack(">I", rec[28:32])[0]
+    codec = "utf-8" if enc == 65001 else "cp1252"
+    name_off, name_len = struct.unpack(">II", rec[84:92])
+    out: dict[str, Any] = {"title": rec[name_off:name_off + name_len].decode(codec, "replace")}
+    flags = struct.unpack(">I", rec[128:132])[0] if len(rec) >= 132 else 0
+    e = 16 + hlen
+    if flags & 0x40 and rec[e:e + 4] == b"EXTH":
+        count = struct.unpack(">I", rec[e + 8:e + 12])[0]
+        pos, authors = e + 12, []
+        for _ in range(min(count, 500)):
+            if pos + 8 > len(rec):
+                break
+            typ, ln = struct.unpack(">II", rec[pos:pos + 8])
+            if ln < 8:
+                break
+            val = rec[pos + 8:pos + ln].decode(codec, "replace").strip("\x00 ")
+            key = _EXTH.get(typ)
+            if key == "author":
+                authors.append(val)
+            elif key == "title" and val:
+                out["title"] = val  # EXTH 503 (updated title) beats the header full name
+            elif key and val and key != "description":
+                out.setdefault(key, val)
+            pos += ln
+        if authors:
+            out["author"] = "; ".join(dict.fromkeys(authors))
+    if out.get("isbn"):
+        d = re.sub(r"[^0-9Xx]", "", out["isbn"])
+        out["isbn"] = d if len(d) in (10, 13) else None
+    date = out.pop("date", None)
+    if date and date[:4].isdigit():
+        out["year"] = int(date[:4])
+    out.pop("asin", None)
+    return out
+
+
 def clean_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     """Resolve IndirectObjects and coerce every scalar value to a clean str (or None)."""
     from .olindex import as_str
@@ -190,6 +247,8 @@ def extract_metadata(path: Path, content_scan: bool = True) -> dict[str, Any]:
             meta |= clean_metadata(epub_metadata(path))
         elif path.suffix.lower() == ".pdf":
             meta |= pdf_metadata(path)
+        elif path.suffix.lower() in (".mobi", ".azw3", ".azw", ".prc"):
+            meta |= clean_metadata(mobi_metadata(path))
         elif kind == "audio":
             tags = read_audio_tags(path)
             meta |= {"title": tags.get("album") or tags.get("title"),
@@ -197,6 +256,9 @@ def extract_metadata(path: Path, content_scan: bool = True) -> dict[str, Any]:
             meta |= clean_metadata({k: meta.get(k) for k in ("title", "author")})
     except Exception as exc:  # corrupt files still get filename-based handling
         meta["extract_error"] = str(exc)
+    if kind == "ebook":
+        nt, na = split_filename(path.name)
+        meta |= {"name_title": nt, "name_author": na}
     if content_scan and path.suffix.lower() in (".pdf", ".epub"):
         weak = contentscan.weak_reasons(meta)
         if weak:
@@ -237,6 +299,54 @@ def filename_title(name: str) -> str | None:
     return None if title_is_garbage(t) else t
 
 
+_NAME_SEP = re.compile(r"\s+[-\u2013\u2014]\s+")
+_NOT_AUTHOR = re.compile(r"\d|\b(edition|vol|volume|book|part|series|introduction|guide|"
+                         r"history|the|of|and the|for)\b", re.I)
+
+
+def _name_author(raw: str) -> str | None:
+    """'Warburton, Nigel' -> 'Nigel Warburton'; 'Krauss, Lawrence M_' -> 'Lawrence M.
+    Krauss'; 'Michele Boldrin;David K. Levine' -> 'Michele Boldrin; David K. Levine'.
+    None if it does not look like person names."""
+    from .contentscan import looks_like_name
+
+    raw = raw.strip(" _.-")
+    names = []
+    for part in re.split(r"\s*(?:;|&|\band\b)\s*", raw):
+        part = re.sub(r"(?<=\b[A-Z])_", ".", part.strip(" _")).strip(" _")
+        part = re.sub(r"_", " ", part)
+        if part.count(",") == 1:
+            last, first = (x.strip() for x in part.split(","))
+            part = f"{first} {last}".strip()
+        part = re.sub(r"\b([A-Z])(?=\s|$)", r"\1.", part)  # bare initial -> 'M.'
+        part = re.sub(r"\s+", " ", part).strip()
+        if not part or _NOT_AUTHOR.search(part) or not looks_like_name(part.replace(".", ". ")
+                                                                         .replace(".  ", ". ")):
+            return None
+        names.append(part)
+    return "; ".join(names) if names else None
+
+
+def split_filename(name: str) -> tuple[str | None, str | None]:
+    """('Title', 'Author') from 'Title - Author.ext' (Calibre/Kindle export style);
+    '_' as ':' in titles ('Anarchism_ A Very Short Introduction'). Author must look like
+    person names, otherwise the whole stem is the title."""
+    stem = Path(name).stem
+    parts = _NAME_SEP.split(stem)
+    title, author = stem, None
+    if len(parts) >= 2:
+        cand = _name_author(parts[-1])
+        if cand:
+            title, author = " - ".join(parts[:-1]), cand
+        else:
+            cand = _name_author(parts[0]) if "," in parts[0] else None  # 'Last, First - Title'
+            if cand and len(parts) == 2:
+                title, author = parts[1], cand
+    title = re.sub(r"_\s+", ": ", title)
+    t = filename_title(title + ".x")
+    return t, author
+
+
 def name_isbns(meta: dict[str, Any]) -> list[str]:
     """Check-digit-valid ISBNs in the file name and the embedded title
     ('0321670329.pdf', 'Microsoft Word - 978-1-4302-4002-0_Smithwick_Front.doc')."""
@@ -258,7 +368,8 @@ def lookup_fields(meta: dict[str, Any]) -> dict[str, Any]:
 
     title, src = meta.get("title"), "embedded"
     if not title or title_is_garbage(title, meta.get("filename")):
-        title, src = filename_title(meta.get("filename") or ""), "filename"
+        title, src = (meta.get("name_title") or filename_title(meta.get("filename") or "")
+                      ), "filename"
         ct = meta.get("content_title")
         ct_ok = bool(ct) and not title_is_garbage(ct) and not title_is_garbled(ct)
         if ct_ok and (not title or len(title.split()) < 2):  # 'broken.pdf', 'book1.pdf'
@@ -268,7 +379,7 @@ def lookup_fields(meta: dict[str, Any]) -> dict[str, Any]:
     author = meta.get("author")
     if not author or title_is_garbage(author):
         ca = meta.get("content_author")
-        author = ca if ca and not title_is_garbled(ca) else None
+        author = meta.get("name_author") or (ca if ca and not title_is_garbled(ca) else None)
     isbn = meta.get("isbn") or next(iter(name_isbns(meta)), None) or meta.get("content_isbn")
     return {"title": title, "author": author, "isbn": isbn, "title_source": src}
 

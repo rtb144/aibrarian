@@ -583,6 +583,17 @@ it). Google Books is off (`AIB_GOOGLE_BOOKS_ENABLED=false`); when enabled, resul
 cached per process and a 429 pauses calls for 10 minutes. httpx request logs are WARNING
 only and `key=` query params are redacted in all logs.
 
+MOBI/AZW3: title (EXTH 503 or header full name), author (EXTH 100), ISBN (104), publisher
+and year are read from record 0 (pure Python). File names `Title - Author.ext` are split
+(`Last, First`, `;` between authors, trailing `_`, `_ ` as `: `); the split title/author
+count as evidence like embedded metadata (title+author agreeing with Open Library -> up to
+0.95). Author matching folds accents/case/punctuation and treats same surname + first
+initial as a full match (`Lawrence M. Krauss` = `Lawrence Maxwell Krauss`).
+
+`aibrarian books explain --id N` (or `--path FILE`, add `--catalog` for a full run incl.
+the LLM; nothing is saved) prints the extracted metadata, lookup fields, every Open Library
+lookup tried with its hit, and the score breakdown.
+
 `aibrarian books rescan [--status S ...] [--id N ...] [--limit N] [--execute]` re-catalogs
 book suggestions in place (same id) - default statuses `error`, `needs_review`, `review`
 and `reject` (the last two = status `open` with that decision); `--id` picks exact rows. Dry run prints count + sample. Each update
