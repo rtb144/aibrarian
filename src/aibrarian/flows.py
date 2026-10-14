@@ -25,6 +25,7 @@ from aibrarian import services
 from aibrarian.actions import Context, discover, run_action
 from aibrarian.config import get_settings
 from aibrarian.logging_setup import setup_logging
+from aibrarian.profiling import init_profiling, profiled, stage
 from aibrarian.progress import ProgressReporter
 from aibrarian.quarantine import PURGE_CRON
 from aibrarian.status import ACTIONS, MAX_ATTEMPTS
@@ -59,7 +60,8 @@ def _make_action_task(name: str):
     def _t(media_id: int) -> str:
         # RetryableError propagates -> Prefect retries; the final attempt moves the
         # item to 'failed' and returns normally (see run_action).
-        return run_action(ctx(), name, media_id)
+        with stage(name, media_id=media_id):
+            return run_action(ctx(), name, media_id)
     return _t
 
 
@@ -72,6 +74,7 @@ def discover_task(roots: list[str] | None = None) -> dict:
 
 
 @flow(name="stage", log_prints=True)
+@profiled("flow:stage")
 def stage_flow(action: str, limit: int = 20, roots: list[str] | None = None) -> dict:
     """Run one action over up to ``limit`` items waiting in its input stage."""
     spec = ACTIONS[action]
@@ -90,12 +93,14 @@ def stage_flow(action: str, limit: int = 20, roots: list[str] | None = None) -> 
 
 
 @flow(name="discover", log_prints=True)
+@profiled("flow:discover")
 def discover_flow(roots: list[str] | None = None) -> dict:
     """Filesystem walk on its own schedule, so processing never waits for it."""
     return discover_task(roots)
 
 
 @flow(name="media-pipeline", log_prints=True)
+@profiled("flow:media-pipeline")
 def pipeline_flow(batch_size: int | None = None, run_discover: bool = False) -> dict:
     """probe -> extract_audio -> transcribe -> embed -> catalog (+ optional discover).
 
@@ -119,12 +124,14 @@ def pipeline_flow(batch_size: int | None = None, run_discover: bool = False) -> 
 
 
 @flow(name="library-scan")
+@profiled("flow:library-scan")
 def library_scan_flow(max_items: int | None = None, resume: bool = True) -> dict:
     return services.library_scan(ctx(), max_items, resume, _run_ids()[0],
                                  reporter=ProgressReporter("library-scan"))
 
 
 @flow(name="book-scan")
+@profiled("flow:book-scan")
 def book_scan_flow(paths: list[str] | None = None, resume: bool = True,
                    max_items: int | None = None) -> dict:
     return services.book_scan(ctx(), [Path(p) for p in paths] if paths else None, resume,
@@ -133,6 +140,7 @@ def book_scan_flow(paths: list[str] | None = None, resume: bool = True,
 
 
 @flow(name="reprobe")
+@profiled("flow:reprobe")
 def reprobe_flow(only_missing: bool = True, limit: int | None = None) -> dict:
     """Refresh ffprobe metadata for items already past 'discovered' without
     resetting their stage (e.g. after the media_info upgrade)."""
@@ -142,6 +150,7 @@ def reprobe_flow(only_missing: bool = True, limit: int | None = None) -> dict:
 
 
 @flow(name="duplicates")
+@profiled("flow:duplicates")
 def duplicates_flow(exact_only: bool = False) -> dict:
     """Read-only duplicates report (writes report_dir/duplicates.json)."""
     from aibrarian.services import duplicates_report
@@ -150,6 +159,7 @@ def duplicates_flow(exact_only: bool = False) -> dict:
 
 
 @flow(name="dedup-quarantine", log_prints=True)
+@profiled("flow:dedup-quarantine")
 def dedup_quarantine_flow(limit: int | None = None) -> dict:
     """Move extra copies of IDENTICAL groups to quarantine (never review groups, never
     deletes). Each copy's sha256 is re-verified right before the move. Off when
@@ -167,6 +177,7 @@ def dedup_quarantine_flow(limit: int | None = None) -> dict:
 
 
 @flow(name="quarantine-purge", log_prints=True)
+@profiled("flow:quarantine-purge")
 def quarantine_purge_flow(older_than_days: int | None = None, execute: bool = True) -> dict:
     """Permanently delete quarantined copies older than QUARANTINE_RETENTION_DAYS."""
     from aibrarian.services import quarantine_purge
@@ -177,6 +188,7 @@ def quarantine_purge_flow(older_than_days: int | None = None, execute: bool = Tr
 
 
 @flow(name="book-autoapply", log_prints=True)
+@profiled("flow:book-autoapply")
 def book_autoapply_flow(limit: int | None = None) -> dict:
     """Apply open book suggestions >= BOOK_AUTO_MIN_CONFIDENCE (rename/move with sidecars,
     identical copies quarantined, the rest needs_review). Off: BOOK_AUTO_APPLY_ENABLED=false."""
@@ -193,6 +205,7 @@ def book_autoapply_flow(limit: int | None = None) -> dict:
 
 
 @flow(name="calibre-validate", log_prints=True)
+@profiled("flow:calibre-validate")
 def calibre_validate_flow() -> dict:
     """Read-only Calibre consistency check (never writes metadata.db)."""
     from aibrarian.services import books_validate
@@ -203,6 +216,7 @@ def calibre_validate_flow() -> dict:
 
 
 @flow(name="calibre-adopt-orphans", log_prints=True)
+@profiled("flow:calibre-adopt-orphans")
 def calibre_adopt_orphans_flow(execute: bool = False, limit: int | None = None) -> dict:
     """Manual only (no schedule): ingest loose files in the Calibre library via calibredb,
     then quarantine the originals. Dry run unless ``execute=True``."""
@@ -214,6 +228,7 @@ def calibre_adopt_orphans_flow(execute: bool = False, limit: int | None = None) 
 
 
 @flow(name="transcript-langcheck", log_prints=True)
+@profiled("flow:transcript-langcheck")
 def transcript_langcheck_flow(limit: int | None = None) -> dict:
     """Read-only: detect non-English / repetitive transcripts, write langcheck.json/.csv
     and refresh aib.transcript_lang (manual reviews are kept). Never touches media."""
@@ -224,6 +239,7 @@ def transcript_langcheck_flow(limit: int | None = None) -> dict:
 
 
 @flow(name="consistency", log_prints=True)
+@profiled("flow:consistency")
 def consistency_flow(pending_minutes: int = 30) -> dict:
     """Read-only catalog <-> filesystem check (see aibrarian.consistency). Writes
     REPORT_DIR/consistency.json (the API turns it into aib_consistency_issues gauges) and
@@ -241,11 +257,13 @@ def consistency_flow(pending_minutes: int = 30) -> dict:
 
 
 @flow(name="retry-failed")
+@profiled("flow:retry-failed")
 def retry_failed_flow() -> int:
     return ctx().db.retry_failed()
 
 
 @flow(name="openlibrary-import")
+@profiled("flow:openlibrary-import")
 def openlibrary_import_flow(dump_path: str, truncate: bool = False) -> dict:
     from aibrarian.openlibrary import import_dump
 
@@ -255,6 +273,7 @@ def openlibrary_import_flow(dump_path: str, truncate: bool = False) -> dict:
 
 
 @flow(name="openlibrary-index")
+@profiled("flow:openlibrary-index")
 def openlibrary_index_flow(rebuild: bool = False) -> dict:
     """Build/refresh the local Open Library index (no-op if the Delta versions are unchanged)."""
     from prefect import get_run_logger
@@ -313,6 +332,7 @@ def main(argv: list[str] | None = None) -> None:
     setup_logging("aibrarian-worker")
     if argv and argv[0] == "serve":
         group = argv[1] if len(argv) > 1 else "all"
+        init_profiling(f"worker-{group}")
         ctx().db.migrate()
         try:
             services.dedup_backfill(ctx())

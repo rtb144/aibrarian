@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     google_books_enabled: bool = Field(
         False, validation_alias=_env("google_books_enabled", "GOOGLE_BOOKS_ENABLED"))
 
+    # --- profiling (Pyroscope) ---------------------------------------------
+    pyroscope_enabled: bool = Field(
+        True, validation_alias=_env("pyroscope_enabled", "PYROSCOPE_ENABLED"))
+    pyroscope_url: str = Field(
+        "http://pyroscope:4040", validation_alias=_env("pyroscope_url", "PYROSCOPE_URL"))
+    pyroscope_app_name: str = Field(
+        "aibrarian", validation_alias=_env("pyroscope_app_name", "PYROSCOPE_APP_NAME"))
+
     # --- behaviour ---------------------------------------------------------
     transcribe_batch_size: int = Field(5, validation_alias=_env("transcribe_batch_size", "BATCH_SIZE"))
     transcribe_interval_s: int = Field(

@@ -517,8 +517,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - flat dispatcher
         if "applied" in (args.status or []):
             print("applied suggestions are never rescanned", file=sys.stderr)
             return 2
-        res = services.book_rescan(ctx, args.status, args.execute, args.limit, progress=_say,
-                                   ids=args.id)
+        from .profiling import init_profiling, stage
+
+        init_profiling("cli")
+        with stage("book_rescan"):
+            res = services.book_rescan(ctx, args.status, args.execute, args.limit, progress=_say,
+                                       ids=args.id)
         if args.json:
             print(json.dumps(res, indent=2, default=str))
         elif res.get("locked"):

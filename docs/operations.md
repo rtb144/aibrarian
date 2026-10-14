@@ -626,3 +626,24 @@ READ ONLY transaction without advisory locks and Calibre's metadata.db with `mod
 safe while book-scan runs. Writes the JSON report and a CSV next to it. Content is sample-hashed
 only on exact size matches, capped by `--max-hash`.
 Run: `docker compose exec aibrarian-api aibrarian --plain-logs downloads triage`.
+
+## Continuous profiling (Pyroscope)
+
+API, CPU worker and GPU worker push CPU profiles to Pyroscope via `pyroscope-io`
+(`aibrarian/profiling.py`). Samples are tagged with `service` (api / worker-cpu / worker-gpu),
+`host`, `stage` (`probe`, `extract_audio`, `transcribe`, `embed`, `catalog`, `flow:<name>`,
+`book_rescan`) and `prefect_run` (the Prefect flow-run id), so Grafana can show a flame graph
+per pipeline stage (filter e.g. `{service_name="aibrarian", stage="transcribe"}`).
+
+Profiling is **on by default** and points at `http://pyroscope:4040`. An unreachable server is
+harmless: the agent uploads from a background thread, its own logging is disabled and
+aibrarian warns at most once if initialisation fails. Settings (`.env`):
+
+```
+PYROSCOPE_ENABLED=true            # false to turn it off
+PYROSCOPE_URL=http://pyroscope:4040
+PYROSCOPE_APP_NAME=aibrarian
+```
+
+The Pyroscope server must share a Docker network with the aibrarian containers (or set
+`PYROSCOPE_URL` to a host address such as `http://host.docker.internal:4040`).

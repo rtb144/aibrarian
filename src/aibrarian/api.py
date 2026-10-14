@@ -528,5 +528,8 @@ def main() -> None:
     from .logging_setup import setup_logging
 
     setup_logging("aibrarian-api")
+    from .profiling import init_profiling
+
+    init_profiling("api")
     uvicorn.run(create_app(), host="0.0.0.0", port=int(os.getenv("AIB_API_PORT", "8790")),
                 log_config=None)
