@@ -1,5 +1,5 @@
 # ruff: noqa: E501, E741
-"""Generate the TV-playlist dashboards (aibrarian-{pipeline,library,gpu,host,containers}.json).
+"""Generate the TV-playlist dashboards (aibrarian-{pipeline,library,gpu,host,containers,profiling}.json).
 
 Run: python monitoring/grafana/build_dashboards.py  (pure stdlib, writes next to this file).
 Each dashboard fits one 1080p screen (<= 28 grid rows), refresh 30s, last 6h,
@@ -232,8 +232,55 @@ def containers():
     return dash("aibrarian-containers", "aibrarian · Containers (z8g4)", stats + [table, cpu, mem])
 
 
+PYRO = {"type": "grafana-pyroscope-datasource", "uid": "${ds_pyroscope}"}
+CPU_PROFILE = "process_cpu:cpu:nanoseconds:cpu:nanoseconds"
+# pyroscope-io sends application_name ("aibrarian" by default) as Pyroscope's service_name;
+# our own tags (service, stage, host, prefect_run, media_id) arrive as plain labels.
+SEL = '{service_name="${app}", service=~"${service:regex}", stage=~"${stage:regex}"}'
+
+
+def _pyro_var(name, label):
+    q = {"type": "labelValue", "profileTypeId": CPU_PROFILE, "labelName": name, "refId": name}
+    return {"name": name, "label": label, "type": "query", "datasource": PYRO, "query": q,
+            "definition": f"labelValue {name}", "refresh": 2, "includeAll": True, "multi": True,
+            "allValue": ".*", "current": {"selected": True, "text": ["All"], "value": ["$__all"]},
+            "sort": 1}
+
+
+def profiling():
+    def t(qtype, **kw):
+        return {"refId": "A", "datasource": PYRO, "queryType": qtype, "profileTypeId": CPU_PROFILE,
+                "labelSelector": SEL, "groupBy": [], **kw}
+    base = {"datasource": PYRO, "fieldConfig": {"defaults": {}, "overrides": []}}
+    panels = [
+        {**base, "id": 1, "type": "timeseries", "title": "CPU by stage",
+         "description": "CPU time per second by stage tag (Pyroscope), filtered by service/stage.",
+         "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
+         "targets": [t("metrics", groupBy=["stage"])],
+         "fieldConfig": {"defaults": {"unit": "ns", "custom": {"lineWidth": 2, "fillOpacity": 10, "stacking": {"mode": "normal"}}}, "overrides": []},
+         "options": {"legend": {"displayMode": "list", "placement": "right"}}},
+        {**base, "id": 2, "type": "flamegraph", "title": "CPU flame graph",
+         "description": "Pyroscope CPU flame graph for the selected service(s) and stage(s).",
+         "gridPos": {"x": 0, "y": 8, "w": 24, "h": 20},
+         "targets": [t("profile")]},
+    ]
+    templ = [
+        {"name": "ds_pyroscope", "label": "Pyroscope", "type": "datasource",
+         "query": "grafana-pyroscope-datasource", "refresh": 1, "hide": 0},
+        {"name": "app", "label": "service_name", "type": "custom", "query": "aibrarian",
+         "current": {"selected": True, "text": "aibrarian", "value": "aibrarian"},
+         "options": [{"selected": True, "text": "aibrarian", "value": "aibrarian"}]},
+        _pyro_var("service", "service"),
+        _pyro_var("stage", "stage"),
+    ]
+    return {"uid": "aibrarian-profiling", "title": "aibrarian · Profiling", "tags": ["aibrarian"],
+            "schemaVersion": 39, "version": 1, "time": {"from": "now-1h", "to": "now"},
+            "refresh": "1m", "timezone": "browser", "editable": True, "graphTooltip": 1,
+            "templating": {"list": templ}, "panels": panels}
+
+
 if __name__ == "__main__":
     here = Path(__file__).parent
-    for name, fn in [("pipeline", pipeline), ("library", library), ("gpu", gpu), ("host", host), ("containers", containers)]:
+    for name, fn in [("pipeline", pipeline), ("library", library), ("gpu", gpu), ("host", host), ("containers", containers), ("profiling", profiling)]:
         _id = 0
         (here / f"aibrarian-{name}.json").write_text(json.dumps(fn(), indent=2) + "\n")

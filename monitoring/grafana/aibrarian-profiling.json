@@ -1,0 +1,192 @@
+{
+  "uid": "aibrarian-profiling",
+  "title": "aibrarian \u00b7 Profiling",
+  "tags": [
+    "aibrarian"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "ds_pyroscope",
+        "label": "Pyroscope",
+        "type": "datasource",
+        "query": "grafana-pyroscope-datasource",
+        "refresh": 1,
+        "hide": 0
+      },
+      {
+        "name": "app",
+        "label": "service_name",
+        "type": "custom",
+        "query": "aibrarian",
+        "current": {
+          "selected": true,
+          "text": "aibrarian",
+          "value": "aibrarian"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "aibrarian",
+            "value": "aibrarian"
+          }
+        ]
+      },
+      {
+        "name": "service",
+        "label": "service",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-pyroscope-datasource",
+          "uid": "${ds_pyroscope}"
+        },
+        "query": {
+          "type": "labelValue",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "labelName": "service",
+          "refId": "service"
+        },
+        "definition": "labelValue service",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1
+      },
+      {
+        "name": "stage",
+        "label": "stage",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-pyroscope-datasource",
+          "uid": "${ds_pyroscope}"
+        },
+        "query": {
+          "type": "labelValue",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "labelName": "stage",
+          "refId": "stage"
+        },
+        "definition": "labelValue stage",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "${ds_pyroscope}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ns",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU by stage",
+      "description": "CPU time per second by stage tag (Pyroscope), filtered by service/stage.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "${ds_pyroscope}"
+          },
+          "queryType": "metrics",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "labelSelector": "{service_name=\"${app}\", service=~\"${service:regex}\", stage=~\"${stage:regex}\"}",
+          "groupBy": [
+            "stage"
+          ]
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right"
+        }
+      }
+    },
+    {
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "${ds_pyroscope}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "id": 2,
+      "type": "flamegraph",
+      "title": "CPU flame graph",
+      "description": "Pyroscope CPU flame graph for the selected service(s) and stage(s).",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "${ds_pyroscope}"
+          },
+          "queryType": "profile",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "labelSelector": "{service_name=\"${app}\", service=~\"${service:regex}\", stage=~\"${stage:regex}\"}",
+          "groupBy": []
+        }
+      ]
+    }
+  ]
+}
