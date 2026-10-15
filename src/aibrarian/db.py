@@ -647,13 +647,20 @@ class Database:
                    flow_run_id: str | None = None, task_run_id: str | None = None) -> bool:
         """Atomically move an item and append a history event. Guarded by the
         expected ``from_stage`` so racing workers cannot double-apply. Returns
-        False if the item was no longer in ``from_stage``."""
+        False if the item was no longer in ``from_stage``.
+
+        Side states must say why: ``skipped`` / ``needs_review`` / ``failed``
+        require ``error`` (stored in ``last_error``), and ``failed_stage``
+        records the stage the item was in when it left the main path."""
+        if str(to_stage) in ("skipped", "needs_review", "failed") and not error:
+            raise ValueError(f"transition to {to_stage} requires a reason (error=...)")
         with self.conn() as c:
             cur = c.execute(
                 """UPDATE aib.media_file SET stage=%s, stage_changed_at=now(),
                        stage_attempts = CASE WHEN %s='ok' THEN 0 ELSE stage_attempts END,
                        last_error=%s,
-                       failed_stage = CASE WHEN %s='failed' THEN %s ELSE NULL END,
+                       failed_stage = CASE WHEN %s IN ('failed','skipped','needs_review')
+                                    THEN %s ELSE NULL END,
                        locked_by=NULL, locked_at=NULL
                    WHERE id=%s AND stage=%s""",
                 (to_stage, outcome, error, to_stage, from_stage, media_id, from_stage))

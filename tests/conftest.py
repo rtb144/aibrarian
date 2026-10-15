@@ -47,8 +47,11 @@ class FakeDB:
             return False
         self.media[mid]["stage"] = str(to)
         self.media[mid]["stage_attempts"] = 0 if outcome == "ok" else self.media[mid]["stage_attempts"]
-        if outcome == "failed":
+        if str(to) in ("skipped", "needs_review", "failed") and not kw.get("error"):
+            raise ValueError(f"transition to {to} requires a reason")
+        if str(to) in ("skipped", "needs_review", "failed"):
             self.media[mid]["failed_stage"] = frm
+        self.media[mid]["last_error"] = kw.get("error")
         self.events.append({"media_id": mid, "action": action, "from": frm, "to": str(to),
                             "outcome": outcome, **kw})
         return True

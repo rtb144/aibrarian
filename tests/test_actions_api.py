@@ -108,6 +108,29 @@ def test_no_audio_is_skipped(ctx):
     row = ctx.db.add(path="/x.mkv")
     assert run_action(ctx, "probe", row["id"]) == "skipped"
     assert ctx.db.media[row["id"]]["stage"] == "skipped"
+    m = ctx.db.media[row["id"]]
+    assert m["last_error"].startswith("skip: no audio stream")
+    assert m["failed_stage"] == "discovered"
+
+
+def test_side_reason_every_skip_has_text():
+    from aibrarian.actions import Outcome, side_reason
+    from aibrarian.status import Stage
+    assert side_reason(Outcome(Stage.SKIPPED, {"reason": "no speech detected (empty transcript)",
+                                               "language": "en"}), "transcribe") == \
+        "skip: no speech detected (empty transcript) (language=en)"
+    assert side_reason(Outcome(Stage.SKIPPED), "x") == "skip: unspecified (action x)"
+    assert side_reason(Outcome(Stage.NEEDS_REVIEW, {"confidence": 0.4, "decision": "review"}),
+                       "catalog") == "review: low confidence 0.40 (decision review)"
+    assert side_reason(Outcome(Stage.PROBED), "probe") is None
+    assert side_reason(Outcome(Stage.SKIPPED, error="custom"), "x") == "custom"
+
+
+def test_transition_guard_requires_reason(ctx):
+    import pytest
+    row = ctx.db.add(path="/y.mkv")
+    with pytest.raises(ValueError):
+        ctx.db.transition(row["id"], "probe", "discovered", "skipped", "skipped", None)
 
 
 def test_retries_then_failed(ctx):

@@ -98,6 +98,27 @@ class Outcome:
                 Stage.FAILED: "failed"}.get(self.to_stage, "ok")
 
 
+def side_reason(outcome: Outcome, action: str) -> str | None:
+    """Human-readable ``last_error`` for skipped / needs_review outcomes.
+
+    Every skip must say why (``skip: no audio stream``); needs_review says what
+    to look at. Explicit ``outcome.error`` wins."""
+    if outcome.error:
+        return outcome.error
+    d = outcome.details or {}
+    if outcome.to_stage == Stage.SKIPPED:
+        why = d.get("reason") or f"unspecified (action {action})"
+        extra = ", ".join(f"{k}={d[k]}" for k in ("language", "audio_streams", "duration_s")
+                          if d.get(k) is not None)
+        return f"skip: {why}" + (f" ({extra})" if extra else "")
+    if outcome.to_stage == Stage.NEEDS_REVIEW:
+        why = d.get("reason")
+        if not why and d.get("confidence") is not None:
+            why = f"low confidence {float(d['confidence']):.2f} (decision {d.get('decision')})"
+        return f"review: {why or 'unspecified (action ' + action + ')'}"
+    return None
+
+
 class RetryableError(RuntimeError):
     """Raised after a failed attempt that should be retried by the orchestrator."""
 
@@ -142,7 +163,8 @@ def run_action(ctx: Context, name: str, media: dict[str, Any] | int,
     ACTION_TOTAL.labels(name, outcome.label).inc()
     ACTION_SECONDS.labels(name).observe(time.perf_counter() - t0)
     ok = ctx.db.transition(row["id"], name, spec.requires, outcome.to_stage, outcome.label,
-                           started, attempt=attempt, error=outcome.error,
+                           started, attempt=attempt,
+                           error=side_reason(outcome, name),
                            details=outcome.details, flow_run_id=flow_run_id,
                            task_run_id=task_run_id)
     log.info("action done", extra={"action": name, "media_id": row["id"],
@@ -205,7 +227,8 @@ def store_probe(ctx: Context, row: dict) -> tuple[dict, dict]:
 def probe(ctx: Context, row: dict) -> Outcome:
     data, info = store_probe(ctx, row)
     if not has_audio(data):
-        return Outcome(Stage.SKIPPED, {"reason": "no audio stream"})
+        return Outcome(Stage.SKIPPED, {"reason": "no audio stream",
+                                       "duration_s": duration_of(data)})
     return Outcome(Stage.PROBED, {"duration_s": info["container"]["duration"],
                                   "audio_streams": len(info["audio"]),
                                   "subtitle_streams": len(info["subtitles"]),
@@ -247,7 +270,8 @@ def extract_audio(ctx: Context, row: dict) -> Outcome:
         _, info = store_probe(ctx, row)
     sel = select_audio_stream(info)
     if sel is None:
-        return Outcome(Stage.SKIPPED, {"reason": "no audio stream"})
+        return Outcome(Stage.SKIPPED, {"reason": "no usable audio stream",
+                                       "audio_streams": len(info.get("audio") or [])})
     wav = _wav_path(ctx, row["id"])
     wav.parent.mkdir(parents=True, exist_ok=True)
     marker = wav.with_suffix(".stream")  # which track the cached WAV came from
@@ -312,8 +336,9 @@ def transcribe(ctx: Context, row: dict) -> Outcome:
         Path(row["audio_path"]).unlink(missing_ok=True)
         Path(row["audio_path"]).with_suffix(".stream").unlink(missing_ok=True)
     if not chunks:
-        return Outcome(Stage.SKIPPED, {"reason": "no speech detected",
-                                       "language": result.language})
+        return Outcome(Stage.SKIPPED, {"reason": "no speech detected (empty transcript)",
+                                       "language": result.language,
+                                       "duration_s": result.duration})
     return Outcome(Stage.TRANSCRIBED, {"segments": len(chunks), "language": result.language,
                                        "model": model, "reused_sidecar": reused})
 
