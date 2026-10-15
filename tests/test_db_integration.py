@@ -77,8 +77,14 @@ def test_segments_search_and_suggestions(db):
     ids = db.save_segments(mid, [Segment(seq=0, start=0, end=5, text="in space no one can hear",
                                          words=[(0.0, 1.0, "in")]),
                                  Segment(seq=1, start=5, end=9, text="you scream")],
-                           "a", "en", "large-v3", 9.0)
+                           "a", "en", "large-v3-turbo", 9.0, compute_type="float16",
+                           language_probability=0.9, avg_logprob_mean=-0.3,
+                           max_compression_ratio=1.8)
     assert len(ids) == 2
+    with db.conn() as c:
+        tr = c.execute("SELECT * FROM aib.transcript WHERE media_id=%s", (mid,)).fetchone()
+    assert tr["model"] == "large-v3-turbo" and tr["compute_type"] == "float16"
+    assert tr["max_compression_ratio"] == 1.8 and tr["language_probability"] == 0.9
     hits = db.keyword_search("hear you scream", 5)
     assert hits and hits[0]["media_id"] == mid
     assert db.keyword_search("space", 5, media_id=mid + 99) == []

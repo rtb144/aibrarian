@@ -39,7 +39,7 @@ def ffprobe_runner(audio=True):
 
 
 class FakeTranscriber:
-    model_name = "large-v3"
+    model_name = "large-v3-turbo"
 
     def __init__(self):
         self.calls = 0
@@ -77,6 +77,7 @@ def test_full_pipeline_happy_path(ctx, tmp_path):
                                                     "embed", "catalog"]
     assert video.with_suffix(".srt").exists()  # sidecar written
     assert not (ctx.settings.work_dir / "audio" / f"{row['id']}.wav").exists()  # temp cleaned
+    assert ctx.db.transcripts[row["id"]]["model"] == "large-v3-turbo"
     assert len(ctx.vectors.points) == 1 and len(ctx.windows.points) == 1
     assert ctx.db.suggestions[0].decision == "suggest"
     # idempotent: wrong stage -> noop, no new events

@@ -68,7 +68,7 @@ flowchart LR
 1. **discover**: the filesystem walk over `AIB_TRANSCRIBE_ROOTS` upserts `aib.media_file`. A new file, or one whose fingerprint changed (size + mtime + 1 MiB head/tail hash), goes to `discovered`.
 2. **probe**: ffprobe stores a compact summary and the duration. Files with no audio stream go to `skipped`.
 3. **extract_audio**: ffmpeg writes a 16 kHz mono WAV on CPU, so GPU0 only does inference. This step is a no-op when a valid sidecar already exists.
-4. **transcribe**: whisper large-v3 (VAD, word timestamps), or a reused sidecar. Segments are merged into ~30 s chunks and saved to `aib.segment`; the sidecars are written and the WAV is deleted.
+4. **transcribe**: whisper large-v3-turbo (VAD, word timestamps), or a reused sidecar. Segments are merged into ~30 s chunks and saved to `aib.segment`; the sidecars are written and the WAV is deleted.
 5. **embed**: `nomic-embed-text` embeds the chunks (with a `search_document:` prefix) into `movie_segments`, using point id = segment id and payload `movie_id`. Windows go into `movie_windows`.
 6. **catalog**: the LLM identifies the file using the old strict `MEDIA_SCHEMA`. That result is matched against Jellyfin and stored as a placement suggestion. The item goes to `cataloged` if confident, otherwise to `needs_review`.
 

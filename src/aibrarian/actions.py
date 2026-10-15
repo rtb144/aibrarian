@@ -290,12 +290,20 @@ def transcribe(ctx: Context, row: dict) -> Outcome:
         lang = "en" if is_english(row.get("audio_language")) else s.whisper_language
         result, reused = ctx.transcriber.transcribe(wav, language=lang), False
     chunks = chunk_segments(result.segments, s.segment_chunk_seconds)
+    if reused:  # the model that produced the sidecar (legacy sidecars: always large-v3)
+        model = existing.get("model") or "large-v3"
+        compute_type = existing.get("compute_type") or ("float16" if model == "large-v3" else None)
+    else:
+        model = getattr(ctx.transcriber, "model_name", s.whisper_model)
+        compute_type = getattr(ctx.transcriber, "compute_type", s.whisper_compute_type)
     ctx.db.save_segments(row["id"], chunks, row["fingerprint"], result.language,
-                         s.whisper_model, result.duration)
+                         model, result.duration, compute_type=compute_type,
+                         **result.quality())
     if s.write_sidecars and (not reused or existing.get("legacy")):  # upgrade legacy format
         try:
             sidecars.write_sidecars(video, result_to_dict(
-                result, row["fingerprint"], s.whisper_model,
+                result, row["fingerprint"], model,
+                compute_type=compute_type,
                 audio_stream_index=None if reused else row.get("audio_stream_index"),
                 audio_language=None if reused else row.get("audio_language")))
         except OSError as exc:  # read-only media mount: keep going, note it
@@ -307,7 +315,7 @@ def transcribe(ctx: Context, row: dict) -> Outcome:
         return Outcome(Stage.SKIPPED, {"reason": "no speech detected",
                                        "language": result.language})
     return Outcome(Stage.TRANSCRIBED, {"segments": len(chunks), "language": result.language,
-                                       "reused_sidecar": reused})
+                                       "model": model, "reused_sidecar": reused})
 
 
 def embed(ctx: Context, row: dict) -> Outcome:

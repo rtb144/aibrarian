@@ -703,7 +703,11 @@ class Database:
 
     # -- transcripts --------------------------------------------------------
     def save_segments(self, media_id: int, segments: Sequence[Segment], fingerprint: str,
-                      language: str | None, model: str, duration_s: float | None) -> list[int]:
+                      language: str | None, model: str, duration_s: float | None,
+                      compute_type: str | None = None,
+                      language_probability: float | None = None,
+                      avg_logprob_mean: float | None = None,
+                      max_compression_ratio: float | None = None) -> list[int]:
         with self.conn() as c:
             c.execute("DELETE FROM aib.segment WHERE media_id=%s", (media_id,))
             ids: list[int] = []
@@ -716,11 +720,18 @@ class Database:
                 ).fetchone()
                 ids.append(row["id"])
             c.execute(
-                """INSERT INTO aib.transcript (media_id, fingerprint, language, model, duration_s)
-                   VALUES (%s,%s,%s,%s,%s) ON CONFLICT (media_id) DO UPDATE SET
+                """INSERT INTO aib.transcript (media_id, fingerprint, language, model, duration_s,
+                       compute_type, language_probability, avg_logprob_mean,
+                       max_compression_ratio)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (media_id) DO UPDATE SET
                    fingerprint=EXCLUDED.fingerprint, language=EXCLUDED.language,
-                   model=EXCLUDED.model, duration_s=EXCLUDED.duration_s, updated_at=now()""",
-                (media_id, fingerprint, language, model, duration_s))
+                   model=EXCLUDED.model, duration_s=EXCLUDED.duration_s,
+                   compute_type=EXCLUDED.compute_type,
+                   language_probability=EXCLUDED.language_probability,
+                   avg_logprob_mean=EXCLUDED.avg_logprob_mean,
+                   max_compression_ratio=EXCLUDED.max_compression_ratio, updated_at=now()""",
+                (media_id, fingerprint, language, model, duration_s, compute_type,
+                 language_probability, avg_logprob_mean, max_compression_ratio))
             c.commit()
         return ids
 

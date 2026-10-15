@@ -27,6 +27,15 @@ class TranscriptResult:
     segments: list[RawSegment]
     language: str | None
     duration: float | None
+    # quality signals (None when unknown, e.g. reused legacy sidecars)
+    language_probability: float | None = None
+    avg_logprob_mean: float | None = None
+    max_compression_ratio: float | None = None
+
+    def quality(self) -> dict:
+        return {"language_probability": self.language_probability,
+                "avg_logprob_mean": self.avg_logprob_mean,
+                "max_compression_ratio": self.max_compression_ratio}
 
 
 class Transcriber(Protocol):
@@ -64,12 +73,22 @@ class WhisperTranscriber:
         segs, info = self._load().transcribe(
             load_wav(path), language=language or self.language, vad_filter=True, beam_size=5,
             word_timestamps=True)
-        raw = [
-            RawSegment(s.start, s.end, s.text.strip(),
-                       [(w.start, w.end, w.word.strip()) for w in (s.words or [])])
-            for s in segs if s.text.strip()
-        ]
-        return TranscriptResult(raw, info.language, info.duration)
+        raw: list[RawSegment] = []
+        logprobs: list[float] = []
+        ratios: list[float] = []
+        for s in segs:
+            if getattr(s, "avg_logprob", None) is not None:
+                logprobs.append(float(s.avg_logprob))
+            if getattr(s, "compression_ratio", None) is not None:
+                ratios.append(float(s.compression_ratio))
+            if s.text.strip():
+                raw.append(RawSegment(s.start, s.end, s.text.strip(),
+                                      [(w.start, w.end, w.word.strip()) for w in (s.words or [])]))
+        lp = getattr(info, "language_probability", None)
+        return TranscriptResult(raw, info.language, info.duration,
+                                language_probability=None if lp is None else float(lp),
+                                avg_logprob_mean=sum(logprobs) / len(logprobs) if logprobs else None,
+                                max_compression_ratio=max(ratios) if ratios else None)
 
 
 def load_wav(path: Path):
@@ -117,14 +136,18 @@ def chunk_segments(raw: Iterable[RawSegment], target_seconds: float) -> list[Seg
 
 
 def result_to_dict(r: TranscriptResult, fingerprint: str, model: str,
+                   compute_type: str | None = None,
                    audio_stream_index: int | None = None,
                    audio_language: str | None = None) -> dict:
     """Sidecar JSON shape (raw whisper segments, word timings included).
     ``audio_stream_index``/``audio_language``: the ffprobe track transcribed."""
     extra = {} if audio_stream_index is None else {
         "audio_stream_index": audio_stream_index, "audio_language": audio_language}
+    if compute_type:
+        extra["compute_type"] = compute_type
     return {"fingerprint": fingerprint, "model": model, "language": r.language,
             "duration": r.duration, **extra,
+            **({"quality": r.quality()} if any(v is not None for v in r.quality().values()) else {}),
             "segments": [{"start": s.start, "end": s.end, "text": s.text,
                           "words": [list(w) for w in (s.words or [])]} for s in r.segments]}
 
@@ -136,7 +159,11 @@ def _word(w) -> tuple[float, float, str]:
 
 
 def result_from_dict(d: dict) -> TranscriptResult:
+    q = d.get("quality") if isinstance(d.get("quality"), dict) else {}
     return TranscriptResult(
         [RawSegment(float(s["start"]), float(s["end"]), str(s["text"]).strip(),
                     [_word(w) for w in s.get("words") or []] or None) for s in d["segments"]],
-        d.get("language"), d.get("duration"))
+        d.get("language"), d.get("duration"),
+        language_probability=q.get("language_probability"),
+        avg_logprob_mean=q.get("avg_logprob_mean"),
+        max_compression_ratio=q.get("max_compression_ratio"))

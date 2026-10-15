@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 300.0
 
     whisper_model: str = Field(
-        "large-v3", validation_alias=_env("whisper_model", "WHISPER_MODEL"))
+        "large-v3-turbo", validation_alias=_env("whisper_model", "WHISPER_MODEL"))
     whisper_device: str = "cuda"
     whisper_compute_type: str = "float16"
     whisper_language: str | None = None  # None = autodetect

@@ -58,7 +58,9 @@ class FakeDB:
         self.events.append({"media_id": mid, "action": action, "outcome": "failed",
                             "attempt": attempt, "error": error})
 
-    def save_segments(self, mid, chunks, fp, lang, model, dur):
+    def save_segments(self, mid, chunks, fp, lang, model, dur, **quality):
+        self.transcripts = getattr(self, "transcripts", {})
+        self.transcripts[mid] = {"model": model, "language": lang, **quality}
         self.segments[mid] = [{"id": mid * 100 + c.seq, "media_id": mid, "seq": c.seq,
                                "start_s": c.start, "end_s": c.end, "text": c.text,
                                "words": c.words} for c in chunks]

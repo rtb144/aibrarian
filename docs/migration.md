@@ -63,7 +63,7 @@ set, the `AIB_*` name wins.
 | Old `move_log_*.jsonl` / `rename_log_*.jsonl` | Still usable: `cleanup-skipped`, `sync-subtitles` and `srt-report` accept `--log` and normalise the old key names. |
 | Open Library | Re-import the dump: `aibrarian openlibrary-import /data/openlibrary/<file>` (about 1–2 h for editions). Drop the old `openlibrary` DB and `openlibrary.duckdb` afterwards. |
 | Ollama models | Point the new `ollama_models` volume at the old one (see the ROADMAP step), or just `ollama pull` again. |
-| Whisper model cache | New `whisper_models` volume. First start downloads large-v3 (~3 GB). |
+| Whisper model cache | New `whisper_models` volume. First start downloads large-v3-turbo (~1.6 GB). |
 
 Step-by-step instructions are in [ROADMAP.md](ROADMAP.md).
 

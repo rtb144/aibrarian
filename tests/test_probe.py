@@ -141,3 +141,38 @@ def test_load_wav_avoids_pyav(tmp_path, monkeypatch):
     t._model = Model()
     assert t.transcribe(p, language="en").language == "en"
     assert isinstance(seen["audio"], np.ndarray)
+
+
+def test_whisper_quality_signals(tmp_path):
+    from aibrarian.transcribe import WhisperTranscriber, result_from_dict, result_to_dict
+
+    class Seg:
+        def __init__(self, t, lp, cr):
+            self.start, self.end, self.text, self.words = 0.0, 1.0, t, []
+            self.avg_logprob, self.compression_ratio = lp, cr
+
+    class Model:
+        def transcribe(self, audio, **kw):
+            info = type("I", (), {"language": "en", "duration": 2.0,
+                                  "language_probability": 0.97})()
+            return iter([Seg("a", -0.2, 1.5), Seg(" ", -0.6, 3.1)]), info
+
+    t = WhisperTranscriber("large-v3-turbo", "cpu")
+    t._model = Model()
+    p = tmp_path / "x.wav"
+    p.write_bytes(b"not a wav")  # load_wav falls back to the path string
+    r = t.transcribe(p)
+    assert len(r.segments) == 1 and r.language_probability == 0.97
+    assert abs(r.avg_logprob_mean - (-0.4)) < 1e-9 and r.max_compression_ratio == 3.1
+    d = result_to_dict(r, "fp", "large-v3-turbo", compute_type="float16")
+    assert d["compute_type"] == "float16" and d["quality"]["max_compression_ratio"] == 3.1
+    assert result_from_dict(d).quality() == r.quality()
+    assert result_from_dict({"segments": []}).avg_logprob_mean is None
+
+
+def test_migration_014_backfills_large_v3():
+    from aibrarian.db import list_migrations
+
+    sql = dict(list_migrations())
+    key = next(k for k in sql if k.startswith("014"))
+    assert "'large-v3'" in sql[key] and "max_compression_ratio" in sql[key]

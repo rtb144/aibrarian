@@ -24,7 +24,7 @@ def test_defaults_match_old_stack():
     s = Settings(_env_file=None)
     assert s.qdrant_collection == "movie_segments"
     assert s.window_collection == "movie_windows"
-    assert s.llm_model == "qwen3:14b" and s.whisper_model == "large-v3"
+    assert s.llm_model == "qwen3:14b" and s.whisper_model == "large-v3-turbo"
     assert (s.book_min_confidence, s.book_review_confidence) == (0.85, 0.60)
     assert (s.clip_fuzzy_threshold, s.clip_padding_s) == (85, 30.0)
 

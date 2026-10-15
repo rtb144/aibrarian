@@ -8,7 +8,7 @@ HTTP API**. Every step is tracked per media item.
 What it does:
 
 - **Transcribes** every video under `01-movies`, `02-tvshows` and
-  `05-instructional_videos` with faster-whisper `large-v3` on **GPU0**. It
+  `05-instructional_videos` with faster-whisper `large-v3-turbo` on **GPU0**. It
   writes `.srt` and `.transcript.json` sidecars next to each video, and Jellyfin
   picks the `.srt` files up.
 - **Indexes** transcripts for search. Embeddings come from Ollama
