@@ -129,7 +129,7 @@
       "description": "CPU time per second by stage tag (Pyroscope), filtered by service/stage.",
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 20,
         "w": 24,
         "h": 8
       },
@@ -170,7 +170,7 @@
       "description": "Pyroscope CPU flame graph for the selected service(s) and stage(s).",
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 0,
         "w": 24,
         "h": 20
       },

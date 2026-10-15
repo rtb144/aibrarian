@@ -255,13 +255,13 @@ def profiling():
     panels = [
         {**base, "id": 1, "type": "timeseries", "title": "CPU by stage",
          "description": "CPU time per second by stage tag (Pyroscope), filtered by service/stage.",
-         "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
+         "gridPos": {"x": 0, "y": 20, "w": 24, "h": 8},
          "targets": [t("metrics", groupBy=["stage"])],
          "fieldConfig": {"defaults": {"unit": "ns", "custom": {"lineWidth": 2, "fillOpacity": 10, "stacking": {"mode": "normal"}}}, "overrides": []},
          "options": {"legend": {"displayMode": "list", "placement": "right"}}},
         {**base, "id": 2, "type": "flamegraph", "title": "CPU flame graph",
          "description": "Pyroscope CPU flame graph for the selected service(s) and stage(s).",
-         "gridPos": {"x": 0, "y": 8, "w": 24, "h": 20},
+         "gridPos": {"x": 0, "y": 0, "w": 24, "h": 20},
          "targets": [t("profile")]},
     ]
     templ = [
