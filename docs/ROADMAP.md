@@ -129,11 +129,11 @@ you go (edit this file, or copy it into Obsidian).
   Do: during a run, `nvidia-smi`
   Done when: a python process is on **GPU 0** and ollama is on **GPU 1**.
 
-- [ ] **4.5 Try search.**
+- [x] **4.5 Try search.** (verified with Tom)
   Do: `curl 'z8g4:8790/search?q=hello&limit=3'`
   Done when: you get JSON hits with `path`, `start` and `text`.
 
-- [ ] **4.6 Try a clip.**
+- [x] **4.6 Try a clip.** (verified with Tom)
   Do: pick a line from 4.5, then `curl -X POST z8g4:8790/clip -H 'content-type: application/json' -d '{"phrase":"<the line>"}'`
   Done when: a new `.mp4` is in `/opt/stacks/aibrarian/data/clips/` and it plays.
 
@@ -149,7 +149,7 @@ you go (edit this file, or copy it into Obsidian).
   Do: `curl -X POST z8g4:8790/book-scan -H 'content-type: application/json' -d '{"max_items":10}'`
   Done when: `curl z8g4:8790/book-suggestions | jq length` is above 0.
 
-- [ ] **4.10 Build the Open Library reference index (runs ~1–3 h in the background).**
+- [x] **4.10 Build the Open Library reference index (runs ~1–3 h in the background).** (built 2026-10-12)
   Uses the existing Delta Lake at `/opt/openlibrary/delta` (mounted read-only at
   `/openlibrary/delta`); the old dump import (`openlibrary-import`) is not needed.
   Do: Prefect UI → `openlibrary-index` → Run (or wait for Saturday 01:15 UTC).
@@ -158,11 +158,11 @@ you go (edit this file, or copy it into Obsidian).
   Done when: `curl z8g4:8790/openlibrary/stats` shows `index.built_at` and tens of millions of
   `rows_edition` / `rows_isbn`.
 
-- [ ] **4.11 Hook up Prometheus.** (files ready; use your existing Prometheus)
+- [x] **4.11 Hook up Prometheus.** (scraping aibrarian working; verified with Tom)
   Do: append `monitoring/prometheus/aibrarian-scrape.yml` to `scrape_configs` in your existing prometheus.yml, then reload/restart Prometheus.
   Done when: Prometheus → Status → Targets shows aibrarian-api, aibrarian-workers (2) and qdrant **UP**.
 
-- [ ] **4.12 Import the Grafana dashboard.** (file ready)
+- [x] **4.12 Import the Grafana dashboard.** (overview + profiling imported/working; verified with Tom)
   Do: Grafana → Dashboards → New → Import → upload `monitoring/grafana/aibrarian-overview.json`, pick the Prometheus datasource.
   Done when: the "aibrarian overview" dashboard shows stage bars and backlog.
 
